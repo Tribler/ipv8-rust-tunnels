@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.3,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ipv8-rust-tunnels"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+version = "0.1.0"
+
+[tool.maturin]
+module-name = "ipv8_rust_tunnels.rust_endpoint"
+features = ["pyo3/extension-module"]
