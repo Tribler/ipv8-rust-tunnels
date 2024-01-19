@@ -43,11 +43,12 @@ class ShadowDict(UserDict):
 
 class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
 
-    def __init__(self, port=0, ip="0.0.0.0"):
+    def __init__(self, port=0, ip="0.0.0.0", worker_threads=4):
         CryptoEndpoint.__init__(self)
         Endpoint.__init__(self)
         TaskManager.__init__(self)
         self.rust_ep = ep = rust.Endpoint(ip, port)
+        self.worker_threads = worker_threads
         self.loop = asyncio.get_running_loop()
         self.bytes_up = self.bytes_down = 0
         self.prefix = self.settings = None
@@ -123,7 +124,7 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
 
         :return: True is the Endpoint was successfully opened, False otherwise.
         """
-        self.rust_ep.open(self.datagram_received)
+        self.rust_ep.open(self.datagram_received, self.worker_threads)
         return succeed(self.rust_ep.is_open())
 
     def close(self) -> None:

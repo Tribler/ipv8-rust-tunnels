@@ -61,7 +61,7 @@ impl Endpoint {
         }
     }
 
-    fn open(&mut self, callback: PyObject) -> PyResult<()> {
+    fn open(&mut self, callback: PyObject, worker_threads: usize) -> PyResult<()> {
         if self.socket.is_some() {
             return Err(RustError::new_err("Endpoint.open was called behore"));
         }
@@ -72,7 +72,7 @@ impl Endpoint {
         thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(4)
+                .worker_threads(worker_threads)
                 .build()
                 .unwrap();
 
