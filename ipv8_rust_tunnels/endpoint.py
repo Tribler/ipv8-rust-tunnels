@@ -15,7 +15,6 @@ import ipv8_rust_tunnels.rust_endpoint as rust
 from ipv8.messaging.anonymization.crypto import CryptoEndpoint
 from ipv8.messaging.interfaces.udp.endpoint import Endpoint, EndpointClosedException, UDPv4Address
 from ipv8.taskmanager import TaskManager
-from ipv8.util import succeed
 
 
 class ShadowDict(UserDict):
@@ -125,7 +124,7 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         :return: True is the Endpoint was successfully opened, False otherwise.
         """
         self.rust_ep.open(self.datagram_received, self.worker_threads)
-        return succeed(self.rust_ep.is_open())
+        return self.rust_ep.is_open()
 
     def close(self) -> None:
         """
