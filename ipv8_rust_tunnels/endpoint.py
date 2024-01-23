@@ -74,22 +74,31 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         """
         self.prefix = tunnel_community.get_prefix()
         self.settings = settings
+        self.apply_settings()
 
-        self.rust_ep.set_prefix(self.prefix)
-        self.rust_ep.set_max_relay_early(settings.max_relay_early)
-        self.rust_ep.set_peer_flags(settings.peer_flags)
+    def apply_settings(self) -> None:
+        """
+        Apply tunnels settings to the RustEndpoint. If `RustEndpoint.open` hasn't been called yet,
+        the settings will be applied automatically when it is called.
+        """
+        if self.prefix and self.settings and self.is_open():
+            self.rust_ep.set_prefix(self.prefix)
+            self.rust_ep.set_max_relay_early(self.settings.max_relay_early)
+            self.rust_ep.set_peer_flags(self.settings.peer_flags)
 
     def set_max_relay_early(self, max_relay_early: int) -> None:
         """
         Set the maximum number of relay_early cells that are allowed to pass a relay.
         """
-        self.rust_ep.set_max_relay_early(max_relay_early)
+        if self.is_open():
+            self.rust_ep.set_max_relay_early(max_relay_early)
 
     def set_peer_flags(self, max_relay_early: int) -> None:
         """
         Set peer flags.
         """
-        self.rust_ep.set_peer_flags(max_relay_early)
+        if self.is_open():
+            self.rust_ep.set_peer_flags(max_relay_early)
 
     def datagram_received(self, ip: str, port: int, datagram: bytes) -> None:
         """
@@ -124,6 +133,7 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         :return: True is the Endpoint was successfully opened, False otherwise.
         """
         self.rust_ep.open(self.datagram_received, self.worker_threads)
+        self.apply_settings()
         return self.rust_ep.is_open()
 
     def close(self) -> None:
