@@ -74,7 +74,6 @@ impl ExitSocket {
 
     pub fn encrypt_outgoing_cell(&mut self, packet: Vec<u8>) -> Result<Vec<u8>, String> {
         let encrypted_cell = payload::encrypt_cell(&packet, Direction::Backward, &mut self.keys)?;
-        self.bytes_up += encrypted_cell.len() as u32;
         Ok(encrypted_cell)
     }
 
@@ -84,7 +83,7 @@ impl ExitSocket {
         max_relay_early: u8,
     ) -> Result<Vec<u8>, String> {
         let decrypted_cell = payload::decrypt_cell(packet, Direction::Forward, &self.keys)?;
-        self.bytes_down += packet.len() as u32;
+        self.bytes_up += packet.len() as u32;
         self.last_activity = util::get_time();
         payload::check_cell_flags(&decrypted_cell, max_relay_early)?;
         Ok(decrypted_cell)
@@ -137,6 +136,7 @@ impl ExitSocket {
                             return Ok(());
                         }
                         Some(exit) => {
+                            exit.bytes_down += size as u32;
                             let dest = Address::SocketAddress(SocketAddr::from((Ipv4Addr::from(0), 0)));
                             let origin = Address::SocketAddress(socket_addr);
                             let pkt = &buf[..size].to_vec();
@@ -149,7 +149,6 @@ impl ExitSocket {
                                 continue;
                             };
 
-                            exit.bytes_up += encrypted_cell.len() as u32;
                             (exit.peer.clone(), encrypted_cell)
                         }
                     };
