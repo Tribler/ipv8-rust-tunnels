@@ -93,12 +93,12 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         if self.is_open():
             self.rust_ep.set_max_relay_early(max_relay_early)
 
-    def set_peer_flags(self, max_relay_early: int) -> None:
+    def set_peer_flags(self, peer_flags: set[int]) -> None:
         """
         Set peer flags.
         """
         if self.is_open():
-            self.rust_ep.set_peer_flags(max_relay_early)
+            self.rust_ep.set_peer_flags(peer_flags)
 
     def create_udp_associate(self, port: int, hops: int) -> int:
         """
