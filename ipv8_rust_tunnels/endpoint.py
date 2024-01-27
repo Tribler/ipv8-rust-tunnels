@@ -100,6 +100,19 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         if self.is_open():
             self.rust_ep.set_peer_flags(max_relay_early)
 
+    def create_udp_associate(self, port: int, hops: int) -> int:
+        """
+        Create a SOCKS5 UDP associate socket using the given port and hop count.
+        Returns the port on which the socket was created (in case port 0 was given as argument).
+        """
+        return self.rust_ep.create_udp_associate(port, hops)
+
+    def close_udp_associate(self, port: int) -> None:
+        """
+        Close the SOCKS5 UDP associate socket that's bound to the given port.
+        """
+        return self.rust_ep.close_udp_associate(port)
+
     def datagram_received(self, ip: str, port: int, datagram: bytes) -> None:
         """
         Process incoming data that's coming directly from the socket.
