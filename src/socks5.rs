@@ -78,17 +78,9 @@ async fn process_socks5_packet(
 
     let pkt = &buf[header.serialized_len()..].to_vec();
     let address = &header.address;
-    let circuit_id = match addr_to_cid.get(address) {
-        Some(cid) => *cid,
-        None => {
-            let options = get_options(&associated_socket, &circuits);
-            let cid = match options.choose(&mut rand::thread_rng()) {
-                Some(cid) => *cid,
-                None => return None,
-            };
-            addr_to_cid.insert(address.clone(), cid);
-            cid
-        }
+    let Some(circuit_id) = select_circuit(address, associated_socket, circuits, addr_to_cid) else {
+        warn!("No circuits available, dropping packet");
+        return None;
     };
 
     match circuits.lock().unwrap().get_mut(&circuit_id) {
@@ -112,6 +104,33 @@ async fn process_socks5_packet(
             Some((circuit.peer.clone(), encrypted_cell, circuit_id))
         }
         None => return None,
+    }
+}
+
+fn select_circuit(
+    address: &Address,
+    socket: &Arc<UdpSocket>,
+    circuits: &Arc<Mutex<HashMap<u32, Circuit>>>,
+    addr_to_cid: &mut HashMap<Address, u32>,
+) -> Option<u32> {
+    // Remove dead circuits from addr_to_cid
+    if let Some(cid) = addr_to_cid.get(address) {
+        if !circuits.lock().unwrap().contains_key(cid) {
+            debug!("Not sending packet for {} over dead circuit {}, removing link", address, cid);
+            addr_to_cid.remove(address);
+        }
+    }
+
+    match addr_to_cid.get(address) {
+        Some(cid) => Some(*cid),
+        None => {
+            let options = get_options(&socket, &circuits);
+            let Some(&cid) = options.choose(&mut rand::thread_rng()) else {
+                return None;
+            };
+            addr_to_cid.insert(address.clone(), cid);
+            Some(cid)
+        }
     }
 }
 

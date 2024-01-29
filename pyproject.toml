@@ -4,6 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "ipv8-rust-tunnels"
+description = "IPv8 tunnel performance enhancements"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Rust",
