@@ -227,6 +227,15 @@ impl TunnelSocket {
 
             if let Some(socket) = self.get_socket_for_exit(circuit_id) {
                 let resolved_target = self.resolve(target, circuit_id).await?;
+                let ip = resolved_target.ip();
+                // Use is_global, once it is available.
+                if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+                    // For testing purposes, allow all IPs when bound to localhost.
+                    let local_addr = self.socket.local_addr().unwrap();
+                    if !local_addr.ip().is_loopback() {
+                        return Err(format!("Address {} is not allowed. Dropping packet.", ip));
+                    }
+                }
                 return match socket.send_to(&data, resolved_target).await {
                     Ok(bytes) => Ok(bytes),
                     Err(e) => Err(format!("Failed to send data to {}: {}", resolved_target, e)),
