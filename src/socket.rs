@@ -12,9 +12,10 @@ use tokio::runtime::Handle;
 
 use crate::crypto::Direction;
 use crate::payload;
-use crate::routing::circuit::Circuit;
+use crate::routing::circuit::{Circuit, CircuitType};
 use crate::routing::exit::{ExitSocket, PeerFlag};
 use crate::routing::relay::RelayRoute;
+use crate::socks5::UDPAssociate;
 use crate::util::Result;
 
 #[derive(Debug, Clone)]
@@ -45,6 +46,7 @@ pub struct TunnelSocket {
     circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
     relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
     exit_sockets: Arc<Mutex<HashMap<u32, ExitSocket>>>,
+    udp_associates: Arc<Mutex<HashMap<u16, UDPAssociate>>>,
     settings: Arc<ArcSwap<TunnelSettings>>,
 }
 
@@ -54,6 +56,7 @@ impl TunnelSocket {
         circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
         relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
         exit_sockets: Arc<Mutex<HashMap<u32, ExitSocket>>>,
+        udp_associates: Arc<Mutex<HashMap<u16, UDPAssociate>>>,
         settings: Arc<ArcSwap<TunnelSettings>>,
     ) -> Self {
         TunnelSocket {
@@ -61,12 +64,14 @@ impl TunnelSocket {
             circuits,
             relays,
             exit_sockets,
+            udp_associates,
             settings,
         }
     }
 
     pub async fn listen_forever(&mut self) {
         let mut buf = [0; 2048];
+        let listen_addr = self.socket.local_addr().unwrap();
 
         loop {
             match self.socket.recv_from(&mut buf).await {
@@ -81,7 +86,12 @@ impl TunnelSocket {
                     }
 
                     let circuit_id = u32::from_be_bytes(packet[23..27].try_into().unwrap());
-                    trace!("Got packet with circuit ID {} from {}", circuit_id, addr);
+                    trace!(
+                        "Got packet with circuit ID {} from {}. Listening on {}",
+                        circuit_id,
+                        addr,
+                        listen_addr
+                    );
 
                     let mut result = self.handle_cell_for_circuit(packet, addr, circuit_id).await;
                     if Self::handle_result(result, format!("cell for circuit {}", circuit_id)) {
@@ -105,7 +115,7 @@ impl TunnelSocket {
                         continue;
                     }
 
-                    trace!("Dropping cell")
+                    debug!("Dropping cell")
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
                     continue;
@@ -138,29 +148,49 @@ impl TunnelSocket {
             Some(circuit) => {
                 let guard = ArcSwap::load(&self.settings);
                 let cell = circuit.decrypt_incoming_cell(packet, guard.max_relay_early)?;
+                let session_hops = match circuit.circuit_type {
+                    CircuitType::RPDownloader => circuit.goal_hops - 1,
+                    CircuitType::RPSeeder => circuit.goal_hops,
+                    _ => 0,
+                };
                 if cell[29] != 1
                     || payload::has_prefix(&guard.prefix, &cell[30..])
-                    || circuit.socket.is_none()
+                    || (circuit.socket.is_none() && session_hops == 0)
                 {
-                    Some((cell, true))
+                    Some((cell, true, session_hops))
                 } else {
-                    Some((circuit.process_incoming_cell(cell)?, false))
+                    Some((circuit.process_incoming_cell(cell)?, false, session_hops))
                 }
             }
             None => None,
         };
 
-        if let Some((data, to_python)) = result {
+        if let Some((data, to_python, session_hops)) = result {
             let guard = ArcSwap::load(&self.settings);
             if to_python {
                 trace!("Handover cell({}) for circuit {} to Python", data[29], circuit_id);
                 self.call_python(&guard.callback, &addr, &data);
                 return Ok(data.len());
             }
-
             let Some(socket) = self.get_socket_for_circuit(circuit_id) else {
-                // This shouldn't really happen, but we check anyway.
-                return Err(format!("No socket available for exit {}", circuit_id));
+                // It could be that we're getting incoming data from an e2e circuit and we don't have associated
+                // the circuit with a socket yet (meaning that we haven't sent any traffic). If this is the case,
+                // send the packet to all UDP associates with the correct hop count.
+                if session_hops != 0 {
+                    for associate in self.udp_associates.lock().unwrap().values() {
+                        if associate.hops != session_hops || associate.default_remote.is_none() {
+                            continue;
+                        }
+                        let default_remote = associate.default_remote.unwrap();
+                        match associate.socket.try_send_to(&data, default_remote) {
+                            Ok(_) => {}
+                            Err(e) => error!("Error while sending e2e packet to SOCKS5: {}", e),
+                        };
+                    }
+                    return Ok(data.len());
+                }
+                // This shouldn't really happen, but return an error anyway.
+                return Err(format!("No socket available for circuit {}", circuit_id));
             };
             return match socket.send(&data).await {
                 Ok(bytes) => Ok(bytes),
@@ -173,13 +203,15 @@ impl TunnelSocket {
     async fn handle_cell_for_relay(&self, packet: &[u8], circuit_id: u32) -> Result<usize> {
         let result = match self.relays.lock().unwrap().get_mut(&circuit_id) {
             Some(relay) => {
+                let target = relay.peer.clone();
                 let cell = if relay.rendezvous_relay {
                     // We'll do hidden services after releasing the lock
                     packet.to_vec()
                 } else {
+                    trace!("Relaying cell from {} to {} ({})", circuit_id, relay.circuit_id, target);
                     relay.convert_incoming_cell(packet, self.settings.load().max_relay_early)?
                 };
-                Some((relay.peer.clone(), cell, relay.rendezvous_relay))
+                Some((target, cell, relay.rendezvous_relay))
             }
             None => None,
         };

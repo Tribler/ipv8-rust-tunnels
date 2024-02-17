@@ -11,6 +11,7 @@ use routing::circuit::{Circuit, CircuitType};
 use routing::exit::{ExitSocket, PeerFlag};
 use routing::relay::RelayRoute;
 use socket::{TunnelSettings, TunnelSocket};
+use socks5::UDPAssociate;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::{
@@ -20,7 +21,6 @@ use std::{
 };
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot::Sender;
-use tokio::task::JoinHandle;
 
 mod crypto;
 mod payload;
@@ -41,7 +41,7 @@ pub struct Endpoint {
     circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
     relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
     exit_sockets: Arc<Mutex<HashMap<u32, ExitSocket>>>,
-    udp_associates: Arc<Mutex<HashMap<u16, JoinHandle<()>>>>,
+    udp_associates: Arc<Mutex<HashMap<u16, UDPAssociate>>>,
     tokio_shutdown: Option<Sender<()>>,
 }
 
@@ -99,6 +99,7 @@ impl Endpoint {
         let circuits = self.circuits.clone();
         let relays = self.relays.clone();
         let exit_sockets = self.exit_sockets.clone();
+        let udp_associates = self.udp_associates.clone();
         let (socket_tx, socket_rx) = std::sync::mpsc::channel();
         settings.load().handle.spawn(async move {
             let socket = Arc::new(UdpSocket::bind(addr).await.unwrap());
@@ -107,7 +108,7 @@ impl Endpoint {
                 .expect("Failed to send Tokio socket");
             info!("Tunnel socket listening on: {:?}", socket.local_addr().unwrap());
 
-            let mut ts = TunnelSocket::new(socket, circuits, relays, exit_sockets, settings);
+            let mut ts = TunnelSocket::new(socket, circuits, relays, exit_sockets, udp_associates, settings);
             ts.listen_forever().await;
         });
         self.socket = Some(socket_rx.recv().expect("Failed to get Tokio socket"));
@@ -133,33 +134,53 @@ impl Endpoint {
         let tunnel_socket = self.socket.clone().unwrap().clone();
         let circuits = self.circuits.clone();
         let settings = self.settings.clone().unwrap().clone();
-        let (port_tx, port_rx) = std::sync::mpsc::channel();
+        let (socket_tx, socket_rx) = std::sync::mpsc::channel();
 
-        let task = settings.load().handle.spawn(async move {
-            let socket = UdpSocket::bind(format!("127.0.0.1:{}", port)).await.unwrap();
-            let port = socket.local_addr().unwrap().port();
-            port_tx.send(port).expect("Failed to send SOCKS5 associate port");
-
-            match socks5::handle_associate(Arc::new(socket), tunnel_socket, circuits, settings, hops)
+        let handle = settings.load().handle.spawn(async move {
+            let socket = match util::create_socket(format!("127.0.0.1:{}", port)) {
+                Ok(socket) => socket,
+                Err(e) => {
+                    error!("UDP associate socket couldn't be created: {}", e);
+                    return;
+                }
+            };
+            socket_tx.send(socket.clone()).expect("Failed to send SOCKS5 associate socket");
+            match socks5::handle_associate(socket, tunnel_socket, circuits, settings, hops)
                 .await
             {
                 Ok(()) => {}
                 Err(e) => error!("Error while handling SOCKS5 connection: {}", e),
             };
         });
-        let port = port_rx.recv().expect("Failed to get SOCKS5 associate port");
-        self.udp_associates.lock().unwrap().insert(port, task);
+
+        let socket = socket_rx.recv().expect("Failed to get SOCKS5 associate socket");
+        let port = socket.local_addr().unwrap().port();
+        let associate = UDPAssociate {
+            socket,
+            handle: Arc::new(handle),
+            default_remote: None,
+            hops,
+        };
+        self.udp_associates.lock().unwrap().insert(port, associate);
         Ok(port)
     }
 
     fn close_udp_associate(&mut self, port: u16) -> PyResult<()> {
         let binding = self.udp_associates.lock().unwrap();
-        let Some(handle) = binding.get(&port) else {
+        let Some(associate) = binding.get(&port) else {
             error!("Could not find UDP associate for port {}", port);
             return Ok(());
         };
-        handle.abort();
+        associate.handle.abort();
         info!("Closed UDP associate for port {}", port);
+        Ok(())
+    }
+
+    fn set_udp_associate_default_remote(&mut self, address: &PyTuple) -> PyResult<()> {
+        let socket_addr = parse_address(address)?;
+        for (_, associate) in self.udp_associates.lock().unwrap().iter_mut() {
+            associate.default_remote = Some(socket_addr.clone());
+        }
         Ok(())
     }
 

@@ -4,7 +4,7 @@ use std::{
 };
 
 use bytes::BytesMut;
-use socks5_proto::UdpHeader;
+use socks5_proto::{Address, UdpHeader};
 use tokio::net::UdpSocket;
 
 use crate::{
@@ -109,7 +109,18 @@ impl Circuit {
 
         let (_, offset) = payload::decode_address(&tunnel_pkt, 27)?;
         let (address, offset) = payload::decode_address(&tunnel_pkt, offset)?;
-        let header = UdpHeader { frag: 0, address };
+
+        let mut origin = address;
+        if self.circuit_type == CircuitType::RPDownloader || self.circuit_type == CircuitType::RPSeeder {
+            let ip = payload::circuit_id_to_ip(self.circuit_id);
+            origin = Address::SocketAddress(SocketAddr::from((ip, 1024)));
+        }
+
+        let header = UdpHeader {
+            frag: 0,
+            address: origin,
+        };
+
         let data = &tunnel_pkt[offset..];
         let socks5_pkt_len = header.serialized_len() + data.len();
         let mut socks5_pkt = BytesMut::with_capacity(socks5_pkt_len);

@@ -1,4 +1,6 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+
+use tokio::net::UdpSocket;
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -10,4 +12,19 @@ pub fn get_time() -> u64 {
             0
         }
     }
+}
+
+pub fn create_socket(addr: String) -> Result<Arc<UdpSocket>> {
+    let socket_std = match std::net::UdpSocket::bind(addr) {
+        Ok(socket) => {
+            socket.set_nonblocking(true).unwrap();
+            socket
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let socket_tokio = match UdpSocket::from_std(socket_std) {
+        Ok(socket) => socket,
+        Err(e) => return Err(e.to_string()),
+    };
+    Ok(Arc::new(socket_tokio))
 }

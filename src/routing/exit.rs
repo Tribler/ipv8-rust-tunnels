@@ -50,26 +50,17 @@ impl ExitSocket {
     }
 
     pub fn open_socket(&mut self, addr: String) {
-        let socket_std = match std::net::UdpSocket::bind(addr) {
+        self.socket = Some(match util::create_socket(addr) {
             Ok(socket) => {
-                socket.set_nonblocking(true).unwrap();
+                let addr = socket.local_addr().unwrap();
+                info!("Exit {} listening on: {:?}", self.circuit_id, addr);
                 socket
             }
             Err(e) => {
                 error!("Error while opening exit socket {}: {}", self.circuit_id, e);
-                return;
+                return
             }
-        };
-        let socket_tokio = match UdpSocket::from_std(socket_std) {
-            Ok(socket) => socket,
-            Err(e) => {
-                error!("Error while creating tokio socket for {}: {}", self.circuit_id, e);
-                return;
-            }
-        };
-        self.socket = Some(Arc::new(socket_tokio));
-        let addr = self.socket.as_mut().unwrap().local_addr().unwrap();
-        info!("Exit {} listening on: {:?}", self.circuit_id, addr);
+        });
     }
 
     pub fn encrypt_outgoing_cell(&mut self, packet: Vec<u8>) -> Result<Vec<u8>, String> {

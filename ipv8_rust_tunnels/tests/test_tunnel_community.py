@@ -44,10 +44,12 @@ def replace(old_func, new_func):  # noqa: ANN001, D103, ANN201
 TestTunnelCommunity.create_node = replace(TestTunnelCommunity.create_node, create_node)
 TestTunnelCommunity.setUp = replace(TestTunnelCommunity.setUp, set_up)
 TestTunnelCommunity.test_tunnel_unicode_destination = \
-    unittest.skip("not available in RestEndpoint")(TestTunnelCommunity.test_tunnel_unicode_destination)
+    unittest.skip("not available in RustEndpoint")(TestTunnelCommunity.test_tunnel_unicode_destination)
 
 TestHiddenServices.create_node = replace(TestHiddenServices.create_node, create_node)
 TestHiddenServices.setUp = replace(TestHiddenServices.setUp, set_up)
+TestHiddenServices.test_dht_lookup_with_counterparty = \
+    unittest.skip("not available in RustEndpoint")(TestHiddenServices.test_dht_lookup_with_counterparty)
 
 
 if __name__ == '__main__':

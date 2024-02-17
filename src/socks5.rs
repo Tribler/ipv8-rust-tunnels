@@ -5,12 +5,22 @@ use std::io::Cursor;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use std::{collections::HashMap, net::SocketAddr};
+use tokio::task::JoinHandle;
 use tokio::net::UdpSocket;
 
-use crate::crypto::Direction;
 use crate::payload;
-use crate::routing::circuit::Circuit;
+use crate::routing::circuit::{Circuit, CircuitType};
 use crate::socket::TunnelSettings;
+
+
+#[derive(Debug, Clone)]
+pub struct UDPAssociate {
+    pub socket: Arc<UdpSocket>,
+    pub handle: Arc<JoinHandle<()>>,
+    pub default_remote: Option<SocketAddr>,
+    pub hops: u8,
+}
+
 
 pub async fn handle_associate(
     associated_socket: Arc<UdpSocket>,
@@ -90,12 +100,13 @@ async fn process_socks5_packet(
                 info!("Associated socket for circuit {}", circuit_id);
             }
 
-            let prefix = &settings.load().prefix;
+            let guard = settings.load();
+            let max_relay_early = guard.max_relay_early;
+            let prefix = &guard.prefix;
             let origin = Address::SocketAddress(SocketAddr::from((Ipv4Addr::from(0), 0)));
             let cell = payload::as_data_cell(prefix, circuit_id, &address, &origin, pkt);
 
-            let Ok(encrypted_cell) = payload::encrypt_cell(&cell, Direction::Forward, &mut circuit.keys)
-            else {
+            let Ok(encrypted_cell) = circuit.encrypt_outgoing_cell(cell, max_relay_early) else {
                 error!("Error while encrypting cell for circuit {:?}", circuit_id);
                 return None;
             };
@@ -113,6 +124,21 @@ fn select_circuit(
     circuits: &Arc<Mutex<HashMap<u32, Circuit>>>,
     addr_to_cid: &mut HashMap<Address, u32>,
 ) -> Option<u32> {
+    // Deal with hidden services
+    if let Address::SocketAddress(SocketAddr::V4(addr)) = address {
+        if addr.port() == 1024 {
+            let cid = payload::ip_to_circuit_id(addr.ip());
+            if let Some(circuit) = circuits.lock().unwrap().get(&cid) {
+                if (circuit.circuit_type == CircuitType::RPDownloader
+                    || circuit.circuit_type == CircuitType::RPSeeder)
+                    && (circuit.keys.len() == circuit.goal_hops as usize)
+                    {
+                        return Some(cid);
+                    }
+            }
+        }
+    }
+
     // Remove dead circuits from addr_to_cid
     if let Some(cid) = addr_to_cid.get(address) {
         if !circuits.lock().unwrap().contains_key(cid) {
@@ -121,6 +147,7 @@ fn select_circuit(
         }
     }
 
+    // Return the circuit_id that's assigned to this address, or return a random circuit_id (if available)
     match addr_to_cid.get(address) {
         Some(cid) => Some(*cid),
         None => {

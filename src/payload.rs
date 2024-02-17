@@ -187,3 +187,12 @@ pub fn could_be_bt(packet: &[u8]) -> bool {
 pub fn could_be_ipv8(packet: &[u8]) -> bool {
     packet.len() >= 23 && packet[0] == 0 && (packet[1] == 1 || packet[1] == 2)
 }
+
+pub fn ip_to_circuit_id(ip: &Ipv4Addr) -> u32 {
+    u32::from_be_bytes(ip.octets().try_into().unwrap())
+}
+
+pub fn circuit_id_to_ip(circuit_id: u32) -> Ipv4Addr {
+    let buf = u32::to_be_bytes(circuit_id);
+    Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3])
+}

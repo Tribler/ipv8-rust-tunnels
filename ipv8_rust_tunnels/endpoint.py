@@ -113,6 +113,12 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         """
         return self.rust_ep.close_udp_associate(port)
 
+    def set_udp_associate_default_remote(self, addr: Address) -> None:
+        """
+        Set the default remote address for all available SOCKS5 UDP associate sockets.
+        """
+        return self.rust_ep.set_udp_associate_default_remote(addr)
+
     def datagram_received(self, ip: str, port: int, datagram: bytes) -> None:
         """
         Process incoming data that's coming directly from the socket.
@@ -149,10 +155,12 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         self.apply_settings()
         return self.rust_ep.is_open()
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """
         Closes the Endpoint.
         """
+        await self.shutdown_task_manager()
+
         if not self.is_open():
             return
 
