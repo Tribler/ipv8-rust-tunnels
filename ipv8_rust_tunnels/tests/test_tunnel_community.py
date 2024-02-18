@@ -11,8 +11,8 @@ def create_node(org, *args, **kwargs):  # noqa: ANN201, ANN002, ANN001, D103
     ipv8 = org(*args, **kwargs)
     ipv8.endpoint = ep = RustEndpoint(0, '127.0.0.1')
 
-    ep.rust_ep.open(ep.datagram_received, 1)
-    ep.rust_ep.set_exit_address("127.0.0.1:0")
+    ep.open()
+    ep.set_exit_address(("127.0.0.1", 0))
     addr = UDPv4Address(*ep.get_address())
 
     ipv8.my_peer.addresses[UDPv4Address] = addr

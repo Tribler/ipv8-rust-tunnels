@@ -15,6 +15,7 @@ import ipv8_rust_tunnels.rust_endpoint as rust
 from ipv8.messaging.anonymization.crypto import CryptoEndpoint
 from ipv8.messaging.interfaces.udp.endpoint import Endpoint, EndpointClosedException, UDPv4Address
 from ipv8.taskmanager import TaskManager
+from ipv8.util import succeed
 
 
 class ShadowDict(UserDict):
@@ -41,8 +42,14 @@ class ShadowDict(UserDict):
 
 
 class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
+    """
+    UDP endpoint implemented in Rust capable of sending/relaying/exiting CellPayloads.
+    """
 
-    def __init__(self, port=0, ip="0.0.0.0", worker_threads=4):
+    def __init__(self, port: int = 0, ip: str = "0.0.0.0", worker_threads: int = 4) -> None:
+        """
+        Create a new RustEndpoint.
+        """
         CryptoEndpoint.__init__(self)
         Endpoint.__init__(self)
         TaskManager.__init__(self)
@@ -58,7 +65,10 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         
         self.register_task('update_stats', self.update_stats, interval=1)
 
-    def update_stats(self):
+    def update_stats(self) -> None:
+        """
+        Updates the statistics of the routing objects using the most recent data from Rust.
+        """
         for circuit in self.circuits.values():
             self.rust_ep.update_circuit_stats(circuit.circuit_id, circuit)
 
@@ -99,6 +109,13 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         """
         if self.is_open():
             self.rust_ep.set_peer_flags(peer_flags)
+
+    def set_exit_address(self, address: Address) -> None:
+        """
+        Sets the address that exit sockets should bind to (e.g., ('0.0.0.0', 0)).
+        """
+        if self.is_open():
+            self.rust_ep.set_exit_address(address)
 
     def create_udp_associate(self, port: int, hops: int) -> int:
         """
@@ -145,7 +162,7 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         self.rust_ep.send_cell(target_addr, packet)
         self.bytes_up += len(packet)
 
-    async def open(self) -> bool:  # noqa: A003
+    def open(self) -> bool:  # noqa: A003
         """
         Open the Endpoint.
 
@@ -153,7 +170,7 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         """
         self.rust_ep.open(self.datagram_received, self.worker_threads)
         self.apply_settings()
-        return self.rust_ep.is_open()
+        return succeed(self.rust_ep.is_open())
 
     async def close(self) -> None:
         """

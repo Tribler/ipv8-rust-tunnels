@@ -1,4 +1,8 @@
-use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tokio::net::UdpSocket;
 
@@ -14,7 +18,7 @@ pub fn get_time() -> u64 {
     }
 }
 
-pub fn create_socket(addr: String) -> Result<Arc<UdpSocket>> {
+pub fn create_socket(addr: SocketAddr) -> Result<Arc<UdpSocket>> {
     let socket_std = match std::net::UdpSocket::bind(addr) {
         Ok(socket) => {
             socket.set_nonblocking(true).unwrap();

@@ -49,7 +49,7 @@ impl ExitSocket {
         }
     }
 
-    pub fn open_socket(&mut self, addr: String) {
+    pub fn open_socket(&mut self, addr: SocketAddr) {
         self.socket = Some(match util::create_socket(addr) {
             Ok(socket) => {
                 let addr = socket.local_addr().unwrap();
@@ -58,7 +58,7 @@ impl ExitSocket {
             }
             Err(e) => {
                 error!("Error while opening exit socket {}: {}", self.circuit_id, e);
-                return
+                return;
             }
         });
     }

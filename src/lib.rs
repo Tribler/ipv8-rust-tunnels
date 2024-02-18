@@ -108,7 +108,8 @@ impl Endpoint {
                 .expect("Failed to send Tokio socket");
             info!("Tunnel socket listening on: {:?}", socket.local_addr().unwrap());
 
-            let mut ts = TunnelSocket::new(socket, circuits, relays, exit_sockets, udp_associates, settings);
+            let mut ts =
+                TunnelSocket::new(socket, circuits, relays, exit_sockets, udp_associates, settings);
             ts.listen_forever().await;
         });
         self.socket = Some(socket_rx.recv().expect("Failed to get Tokio socket"));
@@ -137,17 +138,18 @@ impl Endpoint {
         let (socket_tx, socket_rx) = std::sync::mpsc::channel();
 
         let handle = settings.load().handle.spawn(async move {
-            let socket = match util::create_socket(format!("127.0.0.1:{}", port)) {
+            let addr = format!("127.0.0.1:{}", port).parse().unwrap();
+            let socket = match util::create_socket(addr) {
                 Ok(socket) => socket,
                 Err(e) => {
                     error!("UDP associate socket couldn't be created: {}", e);
                     return;
                 }
             };
-            socket_tx.send(socket.clone()).expect("Failed to send SOCKS5 associate socket");
-            match socks5::handle_associate(socket, tunnel_socket, circuits, settings, hops)
-                .await
-            {
+            socket_tx
+                .send(socket.clone())
+                .expect("Failed to send SOCKS5 associate socket");
+            match socks5::handle_associate(socket, tunnel_socket, circuits, settings, hops).await {
                 Ok(()) => {}
                 Err(e) => error!("Error while handling SOCKS5 connection: {}", e),
             };
@@ -234,7 +236,8 @@ impl Endpoint {
         Ok(())
     }
 
-    fn set_exit_address(&mut self, exit_addr: String) -> PyResult<()> {
+    fn set_exit_address(&mut self, address: &PyTuple) -> PyResult<()> {
+        let exit_addr = parse_address(address)?;
         if let Some(settings) = &self.settings {
             let mut new_settings = TunnelSettings::clone(&settings.load_full());
             new_settings.exit_addr = exit_addr;

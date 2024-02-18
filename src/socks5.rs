@@ -5,13 +5,12 @@ use std::io::Cursor;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use std::{collections::HashMap, net::SocketAddr};
-use tokio::task::JoinHandle;
 use tokio::net::UdpSocket;
+use tokio::task::JoinHandle;
 
 use crate::payload;
 use crate::routing::circuit::{Circuit, CircuitType};
 use crate::socket::TunnelSettings;
-
 
 #[derive(Debug, Clone)]
 pub struct UDPAssociate {
@@ -20,7 +19,6 @@ pub struct UDPAssociate {
     pub default_remote: Option<SocketAddr>,
     pub hops: u8,
 }
-
 
 pub async fn handle_associate(
     associated_socket: Arc<UdpSocket>,
@@ -132,9 +130,9 @@ fn select_circuit(
                 if (circuit.circuit_type == CircuitType::RPDownloader
                     || circuit.circuit_type == CircuitType::RPSeeder)
                     && (circuit.keys.len() == circuit.goal_hops as usize)
-                    {
-                        return Some(cid);
-                    }
+                {
+                    return Some(cid);
+                }
             }
         }
     }

@@ -23,7 +23,7 @@ pub struct TunnelSettings {
     pub prefix: Vec<u8>,
     pub max_relay_early: u8,
     pub peer_flags: HashSet<PeerFlag>,
-    pub exit_addr: String,
+    pub exit_addr: SocketAddr,
     pub callback: PyObject,
     pub handle: Handle,
 }
@@ -34,7 +34,7 @@ impl TunnelSettings {
             prefix: vec![0; 22],
             max_relay_early: 8,
             peer_flags: hash_set![PeerFlag::Relay, PeerFlag::SpeedTest],
-            exit_addr: "[::]:0".to_owned(),
+            exit_addr: "[::]:0".parse().unwrap(),
             callback,
             handle,
         }
