@@ -13,6 +13,9 @@ classifiers = [
 ]
 version = "0.1.0"
 
+[project.urls]
+homepage = "https://github.com/Tribler/ipv8-rust-tunnels"
+
 [tool.maturin]
 module-name = "ipv8_rust_tunnels.rust_endpoint"
 features = ["pyo3/extension-module"]
