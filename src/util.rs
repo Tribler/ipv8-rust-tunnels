@@ -32,3 +32,17 @@ pub fn create_socket(addr: SocketAddr) -> Result<Arc<UdpSocket>> {
     };
     Ok(Arc::new(socket_tokio))
 }
+
+pub fn create_socket_with_retry(addr: SocketAddr) -> Result<Arc<UdpSocket>> {
+    let mut address = addr.clone();
+    for _ in 1..1000 {
+        match create_socket(address) {
+            Ok(socket) => return Ok(socket),
+            Err(e) => {
+                error!("Failed to bind to {} ({}). Retrying now.", address, e);
+                address.set_port(address.port() + 1);
+            }
+        }
+    }
+    Err("Could not create socket".to_owned())
+}

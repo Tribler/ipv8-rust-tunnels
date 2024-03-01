@@ -102,7 +102,7 @@ impl Endpoint {
         let udp_associates = self.udp_associates.clone();
         let (socket_tx, socket_rx) = std::sync::mpsc::channel();
         settings.load().handle.spawn(async move {
-            let socket = Arc::new(UdpSocket::bind(addr).await.unwrap());
+            let socket = util::create_socket_with_retry(addr.parse().unwrap()).unwrap();
             socket_tx
                 .send(socket.clone())
                 .expect("Failed to send Tokio socket");
