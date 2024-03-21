@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import UserDict
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ipv8.messaging.anonymization.community import TunnelCommunity, TunnelSettings
@@ -209,3 +209,12 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         """
         self.bytes_up = 0
         self.bytes_down = 0
+
+    def run_speedtest(self, target_addr: str, associate_port: int, num_packets: int, request_size: int,
+                       response_size: int, timeout_ms: int, window_size: int, callback: Callable) -> None:
+        """
+        Perform a TunnelCommunity speedtest. Connects to an existing UDP associate
+        port and sends test messages to a given target address.
+        """
+        self.rust_ep.run_speedtest(target_addr, associate_port, num_packets, request_size,
+                                   response_size, timeout_ms, window_size, callback)

@@ -27,6 +27,7 @@ mod payload;
 mod routing;
 mod socket;
 mod socks5;
+mod speedtest;
 mod util;
 #[macro_use]
 extern crate log;
@@ -183,6 +184,31 @@ impl Endpoint {
         for (_, associate) in self.udp_associates.lock().unwrap().iter_mut() {
             associate.default_remote = Some(socket_addr.clone());
         }
+        Ok(())
+    }
+
+    fn run_speedtest(
+        &mut self,
+        server_addr: String,
+        associate_port: u16,
+        num_packets: usize,
+        request_size: u16,
+        response_size: u16,
+        timeout_ms: usize,
+        window_size: usize,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        let settings = self.settings.clone().unwrap().clone();
+        settings.load().handle.spawn(speedtest::run_speedtest(
+            server_addr,
+            associate_port,
+            num_packets,
+            request_size,
+            response_size,
+            timeout_ms,
+            window_size,
+            callback,
+        ));
         Ok(())
     }
 

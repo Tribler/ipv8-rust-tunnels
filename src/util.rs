@@ -18,6 +18,16 @@ pub fn get_time() -> u64 {
     }
 }
 
+pub fn get_time_ms() -> u128 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(time) => time.as_millis(),
+        Err(error) => {
+            error!("Failed to get system time: {}", error);
+            0
+        }
+    }
+}
+
 pub fn create_socket(addr: SocketAddr) -> Result<Arc<UdpSocket>> {
     let socket_std = match std::net::UdpSocket::bind(addr) {
         Ok(socket) => {
