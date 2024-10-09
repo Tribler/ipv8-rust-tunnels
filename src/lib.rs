@@ -12,6 +12,7 @@ use routing::exit::{ExitSocket, PeerFlag};
 use routing::relay::RelayRoute;
 use socket::{TunnelSettings, TunnelSocket};
 use socks5::UDPAssociate;
+use stats::Stats;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::{
@@ -28,6 +29,7 @@ mod routing;
 mod socket;
 mod socks5;
 mod speedtest;
+mod stats;
 mod util;
 #[macro_use]
 extern crate log;
@@ -38,6 +40,7 @@ create_exception!(ipv8_rust_tunnels, RustError, PyException);
 pub struct Endpoint {
     addr: String,
     socket: Option<Arc<UdpSocket>>,
+    stats: Arc<Mutex<Stats>>,
     settings: Option<Arc<ArcSwap<TunnelSettings>>>,
     circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
     relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
@@ -53,6 +56,7 @@ impl Endpoint {
         Endpoint {
             addr: format!("{}:{}", listen_addr, list_port),
             socket: None,
+            stats: Arc::new(Mutex::new(Stats::new())),
             settings: None,
             circuits: Arc::new(Mutex::new(HashMap::new())),
             relays: Arc::new(Mutex::new(HashMap::new())),
@@ -97,6 +101,7 @@ impl Endpoint {
 
         info!("Spawning socket task");
         let addr = self.addr.clone();
+        let stats = self.stats.clone();
         let circuits = self.circuits.clone();
         let relays = self.relays.clone();
         let exit_sockets = self.exit_sockets.clone();
@@ -109,8 +114,15 @@ impl Endpoint {
                 .expect("Failed to send Tokio socket");
             info!("Tunnel socket listening on: {:?}", socket.local_addr().unwrap());
 
-            let mut ts =
-                TunnelSocket::new(socket, circuits, relays, exit_sockets, udp_associates, settings);
+            let mut ts = TunnelSocket::new(
+                socket,
+                stats,
+                circuits,
+                relays,
+                exit_sockets,
+                udp_associates,
+                settings,
+            );
             ts.listen_forever().await;
         });
         self.socket = Some(socket_rx.recv().expect("Failed to get Tokio socket"));
@@ -134,6 +146,7 @@ impl Endpoint {
         }
 
         let tunnel_socket = self.socket.clone().unwrap().clone();
+        let stats = self.stats.clone();
         let circuits = self.circuits.clone();
         let settings = self.settings.clone().unwrap().clone();
         let (socket_tx, socket_rx) = std::sync::mpsc::channel();
@@ -150,7 +163,7 @@ impl Endpoint {
             socket_tx
                 .send(socket.clone())
                 .expect("Failed to send SOCKS5 associate socket");
-            match socks5::handle_associate(socket, tunnel_socket, circuits, settings, hops).await {
+            match socks5::handle_associate(socket, tunnel_socket, stats, circuits, settings, hops).await {
                 Ok(()) => {}
                 Err(e) => error!("Error while handling SOCKS5 connection: {}", e),
             };
@@ -210,6 +223,29 @@ impl Endpoint {
             callback,
         ));
         Ok(())
+    }
+
+    fn get_socket_statistics(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        Ok(PyTuple::new(py, self.stats.lock().unwrap().socket_stats.to_vec()).to_object(py))
+    }
+
+    fn get_message_statistics(&mut self, prefix: &PyBytes, py: Python<'_>) -> PyResult<PyObject> {
+        let result = PyDict::new(py);
+
+        let cid: [u8; 22] = match prefix.as_bytes().try_into() {
+            Ok(b) => b,
+            Err(_) => {
+                warn!("Prefix with incorrect length");
+                return Ok(result.to_object(py));
+            }
+        };
+
+        if let Some(stats) = self.stats.lock().unwrap().msg_stats.get(&cid) {
+            for (key, value) in stats.iter() {
+                let _ = result.set_item(key, value.to_vec());
+            }
+        }
+        Ok(result.to_object(py))
     }
 
     fn set_prefix(&mut self, prefix: &PyBytes) -> PyResult<()> {
@@ -459,7 +495,7 @@ impl Endpoint {
         };
 
         match socket.try_send_to(&packet, address) {
-            Ok(_) => {}
+            Ok(_) => self.stats.lock().unwrap().add_up(&packet, packet.len()),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // The socket is busy, so we'll retry on the Tokio thread and await it.
                 let Some(settings) = &self.settings else {
@@ -468,10 +504,11 @@ impl Endpoint {
                 let Some(cloned_socket) = self.socket.clone() else {
                     return Err(RustError::new_err("Socket is not open"));
                 };
+                let cloned_stats = self.stats.clone();
 
                 settings.load().handle.spawn(async move {
                     match cloned_socket.send_to(&packet, address).await {
-                        Ok(_) => {}
+                        Ok(_) => {cloned_stats.lock().unwrap().add_up(&packet, packet.len())}
                         Err(e) => error!("Could not send packet to {}: {}", address, e.to_string()),
                     };
                 });

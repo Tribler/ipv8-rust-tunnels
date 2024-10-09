@@ -78,6 +78,25 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         for exit_socket in self.exit_sockets.values():
             self.rust_ep.update_exit_stats(exit_socket.circuit_id, exit_socket)
 
+    def get_statistics(self, prefix: bytes) -> dict[int, NetworkStat]:
+        """
+        Get the message statistics per message identifier for the given prefix.
+        """
+        result = {}
+        for msg_id, counters in self.rust_ep.get_message_statistics(prefix).items():
+            stat = result[msg_id] = NetworkStat(msg_id)
+            stat.num_up = counters[0]
+            stat.num_down = counters[2]
+            stat.bytes_up = counters[1]
+            stat.bytes_down = counters[3]
+        return result
+
+    def enable_community_statistics(self, community_prefix: bytes, enabled: bool) -> None:
+        """
+        Start tracking stats for packets with the given prefix.
+        """
+        pass
+
     def setup_tunnels(self, tunnel_community: TunnelCommunity, settings: TunnelSettings) -> None:
         """
         Set up the TunnelCommunity.

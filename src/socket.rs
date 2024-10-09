@@ -16,6 +16,7 @@ use crate::routing::circuit::{Circuit, CircuitType};
 use crate::routing::exit::{ExitSocket, PeerFlag};
 use crate::routing::relay::RelayRoute;
 use crate::socks5::UDPAssociate;
+use crate::stats::Stats;
 use crate::util::Result;
 
 #[derive(Debug, Clone)]
@@ -43,6 +44,7 @@ impl TunnelSettings {
 
 pub struct TunnelSocket {
     socket: Arc<UdpSocket>,
+    stats: Arc<Mutex<Stats>>,
     circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
     relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
     exit_sockets: Arc<Mutex<HashMap<u32, ExitSocket>>>,
@@ -53,6 +55,7 @@ pub struct TunnelSocket {
 impl TunnelSocket {
     pub fn new(
         socket: Arc<UdpSocket>,
+        stats: Arc<Mutex<Stats>>,
         circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
         relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
         exit_sockets: Arc<Mutex<HashMap<u32, ExitSocket>>>,
@@ -61,6 +64,7 @@ impl TunnelSocket {
     ) -> Self {
         TunnelSocket {
             socket,
+            stats,
             circuits,
             relays,
             exit_sockets,
@@ -77,6 +81,8 @@ impl TunnelSocket {
             match self.socket.recv_from(&mut buf).await {
                 Ok((n, addr)) => {
                     let packet = &buf[..n];
+                    self.stats.lock().unwrap().add_down(packet, n);
+
                     let guard = ArcSwapAny::load(&self.settings);
 
                     if !payload::is_cell(&guard.prefix, &packet) {
@@ -221,7 +227,10 @@ impl TunnelSocket {
                 data = self.convert_hidden_services(packet, circuit_id)?;
             }
             return match self.socket.send_to(&data, target).await {
-                Ok(bytes) => Ok(bytes),
+                Ok(bytes) => {
+                    self.stats.lock().unwrap().add_up(&data, data.len());
+                    Ok(bytes)
+                }
                 Err(e) => Err(format!("Failed to send data: {}", e)),
             };
         }
@@ -312,10 +321,11 @@ impl TunnelSocket {
                 exit.open_socket(guard.exit_addr.clone());
                 let circuit_id = exit.circuit_id.clone();
                 let socket = self.socket.clone();
+                let stats = self.stats.clone();
                 let exits = self.exit_sockets.clone();
                 let settings = self.settings.clone();
                 let task = guard.handle.spawn(async move {
-                    match ExitSocket::listen_forever(socket, exits, circuit_id, settings).await {
+                    match ExitSocket::listen_forever(socket, stats, exits, circuit_id, settings).await {
                         Ok(_) => {}
                         Err(e) => error!("Error for exit {}: {}", circuit_id, e),
                     };

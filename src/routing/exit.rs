@@ -9,10 +9,7 @@ use socks5_proto::Address;
 use tokio::{net::UdpSocket, task::JoinHandle};
 
 use crate::{
-    crypto::{Direction, SessionKeys},
-    payload,
-    socket::TunnelSettings,
-    util,
+    crypto::{Direction, SessionKeys}, payload, socket::TunnelSettings, stats::Stats, util
 };
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -97,6 +94,7 @@ impl ExitSocket {
 
     pub async fn listen_forever(
         tunnel_socket: Arc<UdpSocket>,
+        stats: Arc<Mutex<Stats>>,
         exits: Arc<Mutex<HashMap<u32, ExitSocket>>>,
         circuit_id: u32,
         settings: Arc<ArcSwap<TunnelSettings>>,
@@ -144,7 +142,10 @@ impl ExitSocket {
                         }
                     };
                     match tunnel_socket.send_to(&cell, target).await {
-                        Ok(_) => debug!("Forwarded packet from {} to {}", socket_addr, circuit_id),
+                        Ok(n) => {
+                            stats.lock().unwrap().add_up(&cell, n);
+                            debug!("Forwarded packet from {} to {}", socket_addr, circuit_id)
+                        },
                         Err(_) => error!("Could not tunnel cell for exit {}", circuit_id),
                     };
                 }

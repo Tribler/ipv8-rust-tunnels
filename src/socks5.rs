@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use crate::payload;
 use crate::routing::circuit::{Circuit, CircuitType};
 use crate::socket::TunnelSettings;
+use crate::stats::Stats;
 
 #[derive(Debug, Clone)]
 pub struct UDPAssociate {
@@ -23,6 +24,7 @@ pub struct UDPAssociate {
 pub async fn handle_associate(
     associated_socket: Arc<UdpSocket>,
     tunnel_socket: Arc<UdpSocket>,
+    stats: Arc<Mutex<Stats>>,
     circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
     settings: Arc<ArcSwap<TunnelSettings>>,
     hops: u8,
@@ -60,7 +62,10 @@ pub async fn handle_associate(
                 };
 
                 match tunnel_socket.send_to(&cell, target).await {
-                    Ok(_) => debug!("Forwarded data from SOCKS5 to circuit {}", circuit_id),
+                    Ok(_) => {
+                        stats.lock().unwrap().add_up(&cell, cell.len());
+                        debug!("Forwarded data from SOCKS5 to circuit {}", circuit_id);
+                    }
                     Err(_) => error!("Could not tunnel cell for circuit {}", circuit_id),
                 };
             }
