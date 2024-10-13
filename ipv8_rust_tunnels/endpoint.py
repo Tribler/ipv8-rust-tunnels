@@ -13,6 +13,7 @@ import asyncio
 import ipv8_rust_tunnels.rust_endpoint as rust
 
 from ipv8.messaging.anonymization.crypto import CryptoEndpoint
+from ipv8.messaging.interfaces.network_stats import NetworkStat
 from ipv8.messaging.interfaces.udp.endpoint import Endpoint, EndpointClosedException, UDPv4Address
 from ipv8.taskmanager import TaskManager
 from ipv8.util import succeed
@@ -65,6 +66,24 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         
         self.register_task('update_stats', self.update_stats, interval=1)
 
+    def add_prefix_listener(self, listener: EndpointListener, prefix: bytes) -> None:
+        """
+        Add an EndpointListener to our listeners, only triggers on packets with a specific prefix.
+
+        :raises: IllegalEndpointListenerError if the provided listener is not an EndpointListener
+        """
+        super().add_prefix_listener(listener, prefix)
+        if self.rust_ep.is_open():
+            self.rust_ep.set_prefixes(list(self._prefix_map.keys()))
+
+    def remove_listener(self, listener: EndpointListener) -> None:
+        """
+        Remove a listener from our listeners, if it is registered.
+        """
+        super().remove_listener(listener)
+        if self.rust_ep.is_open():
+            self.rust_ep.set_prefixes(list(self._prefix_map.keys()))
+
     def update_stats(self) -> None:
         """
         Updates the statistics of the routing objects using the most recent data from Rust.
@@ -112,6 +131,7 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         """
         if self.prefix and self.settings and self.is_open():
             self.rust_ep.set_prefix(self.prefix)
+            self.rust_ep.set_prefixes(list(self._prefix_map.keys()))
             self.rust_ep.set_max_relay_early(self.settings.max_relay_early)
             self.rust_ep.set_peer_flags(self.settings.peer_flags)
 

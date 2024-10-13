@@ -22,6 +22,7 @@ use crate::util::Result;
 #[derive(Debug, Clone)]
 pub struct TunnelSettings {
     pub prefix: Vec<u8>,
+    pub prefixes: Vec<Vec<u8>>,
     pub max_relay_early: u8,
     pub peer_flags: HashSet<PeerFlag>,
     pub exit_addr: SocketAddr,
@@ -33,6 +34,7 @@ impl TunnelSettings {
     pub fn new(callback: PyObject, handle: Handle) -> Self {
         TunnelSettings {
             prefix: vec![0; 22],
+            prefixes: vec![],
             max_relay_early: 8,
             peer_flags: hash_set![PeerFlag::Relay, PeerFlag::SpeedTest],
             exit_addr: "[::]:0".parse().unwrap(),
@@ -86,8 +88,12 @@ impl TunnelSocket {
                     let guard = ArcSwapAny::load(&self.settings);
 
                     if !payload::is_cell(&guard.prefix, &packet) {
-                        trace!("Handover packet with {} bytes from {} to Python", n, addr);
-                        self.call_python(&guard.callback, &addr, packet);
+                        if payload::has_prefixes(&guard.prefixes, packet) {
+                            trace!("Handover packet with {} bytes from {} to Python", n, addr);
+                            self.call_python(&guard.callback, &addr, packet);
+                        } else {
+                            trace!("Dropping packet with {} bytes from {} (unknown prefix).", n, addr);
+                        }
                         continue;
                     }
 

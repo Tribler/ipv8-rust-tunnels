@@ -102,6 +102,15 @@ pub fn has_prefix(prefix: &[u8], packet: &[u8]) -> bool {
     true
 }
 
+pub fn has_prefixes(prefixes: &Vec<Vec<u8>>, packet: &[u8]) -> bool {
+    for prefix in prefixes.iter() {
+        if has_prefix(prefix, packet) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn decode_address(packet: &[u8], offset: usize) -> Result<(Address, usize)> {
     let buf = &packet[offset..];
     match buf[0] {

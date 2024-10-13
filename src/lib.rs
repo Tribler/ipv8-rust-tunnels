@@ -2,7 +2,7 @@ use arc_swap::ArcSwap;
 use crypto::{Direction, SessionKeys};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
-use pyo3::types::{PyList, PySet};
+use pyo3::types::{PyDict, PyList, PySet};
 use pyo3::{
     prelude::*,
     types::{PyBytes, PyTuple},
@@ -260,6 +260,26 @@ impl Endpoint {
         Ok(())
     }
 
+    fn set_prefixes(&mut self, py_prefixes: &PyList) -> PyResult<()> {
+        let mut prefixes = vec![];
+        for py_prefix in py_prefixes.iter() {
+            if let Ok(prefix) = py_prefix.extract::<Vec<u8>>() {
+                prefixes.push(prefix);
+            } else {
+                error!("Failed to convert prefix, skipping");
+            }
+        }
+
+        if let Some(settings) = &self.settings {
+            let mut new_settings = TunnelSettings::clone(&settings.load_full());
+            new_settings.prefixes = prefixes;
+            info!("Set community prefixes: {:?}", new_settings.prefixes);
+            settings.swap(Arc::new(new_settings));
+        } else {
+            error!("Failed to set community prefixes");
+        }
+        Ok(())
+    }
     fn set_max_relay_early(&mut self, max_relay_early: u8) -> PyResult<()> {
         if let Some(settings) = &self.settings {
             let mut new_settings = TunnelSettings::clone(&settings.load_full());
