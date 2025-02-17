@@ -68,7 +68,7 @@ impl Endpoint {
 
     fn open(&mut self, callback: PyObject, worker_threads: usize) -> PyResult<()> {
         if self.socket.is_some() {
-            return Err(RustError::new_err("Endpoint.open was called behore"));
+            return Err(RustError::new_err("Endpoint is already open"));
         }
 
         info!("Spawning Tokio thread");
@@ -137,6 +137,10 @@ impl Endpoint {
                 error!("Unable to shutdown Tokio thread: {:?}", e);
             }
         }
+        self.tokio_shutdown = None;
+        self.socket = None;
+        self.settings = None;
+
         Ok(())
     }
 
