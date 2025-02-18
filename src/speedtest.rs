@@ -112,9 +112,9 @@ pub async fn send_and_wait(
     _: OwnedSemaphorePermit,
 ) {
     let mut random_data = [0; 2048];
-    rand::thread_rng().fill_bytes(&mut random_data);
+    rand::rng().fill_bytes(&mut random_data);
     let payload = &random_data[..request_size as usize];
-    let tid: u32 = rand::thread_rng().gen();
+    let tid: u32 = rand::rng().random();
     let header = UdpHeader::new(0, target.clone());
     let mut socks5_pkt = Vec::with_capacity(header.serialized_len());
     if let Err(e) = header.write_to(&mut socks5_pkt).await {

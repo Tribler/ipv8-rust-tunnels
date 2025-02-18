@@ -1,5 +1,5 @@
 use arc_swap::ArcSwap;
-use rand::seq::SliceRandom;
+use rand::prelude::IndexedRandom;
 use socks5_proto::{Address, UdpHeader};
 use std::io::Cursor;
 use std::net::Ipv4Addr;
@@ -155,7 +155,7 @@ fn select_circuit(
         Some(cid) => Some(*cid),
         None => {
             let options = get_options(&socket, &circuits);
-            let Some(&cid) = options.choose(&mut rand::thread_rng()) else {
+            let Some(&cid) = options.choose(&mut rand::rng()) else {
                 return None;
             };
             addr_to_cid.insert(address.clone(), cid);
