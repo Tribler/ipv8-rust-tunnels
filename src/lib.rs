@@ -1,8 +1,8 @@
 use arc_swap::ArcSwap;
 use crypto::{Direction, SessionKeys};
-use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::types::{PyDict, PyList, PySet};
+use pyo3::{create_exception, IntoPyObjectExt};
 use pyo3::{
     prelude::*,
     types::{PyBytes, PyTuple},
@@ -167,7 +167,8 @@ impl Endpoint {
             socket_tx
                 .send(socket.clone())
                 .expect("Failed to send SOCKS5 associate socket");
-            match socks5::handle_associate(socket, tunnel_socket, stats, circuits, settings, hops).await {
+            match socks5::handle_associate(socket, tunnel_socket, stats, circuits, settings, hops).await
+            {
                 Ok(()) => {}
                 Err(e) => error!("Error while handling SOCKS5 connection: {}", e),
             };
@@ -196,7 +197,7 @@ impl Endpoint {
         Ok(())
     }
 
-    fn set_udp_associate_default_remote(&mut self, address: &PyTuple) -> PyResult<()> {
+    fn set_udp_associate_default_remote(&mut self, address: &Bound<'_, PyTuple>) -> PyResult<()> {
         let socket_addr = parse_address(address)?;
         for (_, associate) in self.udp_associates.lock().unwrap().iter_mut() {
             associate.default_remote = Some(socket_addr.clone());
@@ -230,17 +231,23 @@ impl Endpoint {
     }
 
     fn get_socket_statistics(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        Ok(PyTuple::new(py, self.stats.lock().unwrap().socket_stats.to_vec()).to_object(py))
+        Ok(PyTuple::new(py, self.stats.lock().unwrap().socket_stats.to_vec())?
+            .into_any()
+            .unbind())
     }
 
-    fn get_message_statistics(&mut self, prefix: &PyBytes, py: Python<'_>) -> PyResult<PyObject> {
+    fn get_message_statistics(
+        &mut self,
+        prefix: &Bound<'_, PyBytes>,
+        py: Python<'_>,
+    ) -> PyResult<PyObject> {
         let result = PyDict::new(py);
 
         let cid: [u8; 22] = match prefix.as_bytes().try_into() {
             Ok(b) => b,
             Err(_) => {
                 warn!("Prefix with incorrect length");
-                return Ok(result.to_object(py));
+                return Ok(result.into_any().unbind());
             }
         };
 
@@ -249,12 +256,12 @@ impl Endpoint {
                 let _ = result.set_item(key, value.to_vec());
             }
         }
-        Ok(result.to_object(py))
+        Ok(result.into_any().unbind())
     }
 
-    fn set_prefix(&mut self, prefix: &PyBytes) -> PyResult<()> {
+    fn set_prefix(&mut self, prefix: &Bound<'_, PyBytes>, py: Python<'_>) -> PyResult<()> {
         if let Some(settings) = &self.settings {
-            let mut new_settings = TunnelSettings::clone(&settings.load_full());
+            let mut new_settings = TunnelSettings::clone(settings.load_full(), py);
             new_settings.prefix = prefix.as_bytes().to_vec();
             info!("Set tunnel prefix: {:?}", new_settings.prefix);
             settings.swap(Arc::new(new_settings));
@@ -264,7 +271,7 @@ impl Endpoint {
         Ok(())
     }
 
-    fn set_prefixes(&mut self, py_prefixes: &PyList) -> PyResult<()> {
+    fn set_prefixes(&mut self, py_prefixes: &Bound<'_, PyList>, py: Python<'_>) -> PyResult<()> {
         let mut prefixes = vec![];
         for py_prefix in py_prefixes.iter() {
             if let Ok(prefix) = py_prefix.extract::<Vec<u8>>() {
@@ -275,7 +282,7 @@ impl Endpoint {
         }
 
         if let Some(settings) = &self.settings {
-            let mut new_settings = TunnelSettings::clone(&settings.load_full());
+            let mut new_settings = TunnelSettings::clone(settings.load_full(), py);
             new_settings.prefixes = prefixes;
             info!("Set community prefixes: {:?}", new_settings.prefixes);
             settings.swap(Arc::new(new_settings));
@@ -284,9 +291,9 @@ impl Endpoint {
         }
         Ok(())
     }
-    fn set_max_relay_early(&mut self, max_relay_early: u8) -> PyResult<()> {
+    fn set_max_relay_early(&mut self, max_relay_early: u8, py: Python<'_>) -> PyResult<()> {
         if let Some(settings) = &self.settings {
-            let mut new_settings = TunnelSettings::clone(&settings.load_full());
+            let mut new_settings = TunnelSettings::clone(settings.load_full(), py);
             new_settings.max_relay_early = max_relay_early;
             info!("Set maximum number of relay early cells: {}", new_settings.max_relay_early);
             settings.swap(Arc::new(new_settings));
@@ -296,7 +303,7 @@ impl Endpoint {
         Ok(())
     }
 
-    fn set_peer_flags(&mut self, py_peer_flags: &PyAny) -> PyResult<()> {
+    fn set_peer_flags(&mut self, py_peer_flags: &Bound<'_, PyAny>, py: Python<'_>) -> PyResult<()> {
         let mut peer_flags = HashSet::new();
         for py_peer_flag in py_peer_flags.downcast::<PySet>()? {
             peer_flags.insert(match py_peer_flag.extract::<u16>()? {
@@ -312,7 +319,7 @@ impl Endpoint {
         }
 
         if let Some(settings) = &self.settings {
-            let mut new_settings = TunnelSettings::clone(&settings.load_full());
+            let mut new_settings = TunnelSettings::clone(settings.load_full(), py);
             new_settings.peer_flags = peer_flags;
             info!("Set peer flags: {:?}", new_settings.peer_flags);
             settings.swap(Arc::new(new_settings));
@@ -322,10 +329,10 @@ impl Endpoint {
         Ok(())
     }
 
-    fn set_exit_address(&mut self, address: &PyTuple) -> PyResult<()> {
+    fn set_exit_address(&mut self, address: &Bound<'_, PyTuple>, py: Python<'_>) -> PyResult<()> {
         let exit_addr = parse_address(address)?;
         if let Some(settings) = &self.settings {
-            let mut new_settings = TunnelSettings::clone(&settings.load_full());
+            let mut new_settings = TunnelSettings::clone(settings.load_full(), py);
             new_settings.exit_addr = exit_addr;
             info!("Set exit address: {:?}", new_settings.exit_addr);
             settings.swap(Arc::new(new_settings));
@@ -338,9 +345,9 @@ impl Endpoint {
     fn get_address(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         if let Some(socket) = &self.socket {
             let addr = socket.local_addr().unwrap();
-            let ip = addr.ip().to_string().to_object(py);
-            let port = addr.port().to_object(py);
-            Ok(PyTuple::new(py, vec![ip, port]).to_object(py))
+            let ip = addr.ip().to_string().into_py_any(py)?;
+            let port = addr.port().into_py_any(py)?;
+            Ok(PyTuple::new(py, vec![ip, port])?.into_any().unbind())
         } else {
             Err(RustError::new_err("Socket is not open"))
         }
@@ -361,21 +368,21 @@ impl Endpoint {
             bytes_up += exit.bytes_up;
             bytes_down += exit.bytes_down;
         }
-        Python::with_gil(|py| Ok(PyTuple::new(py, vec![bytes_up, bytes_down]).to_object(py)))
+        Python::with_gil(|py| Ok(PyTuple::new(py, vec![bytes_up, bytes_down])?.into_any().unbind()))
     }
 
     fn is_open(&mut self) -> bool {
         self.socket.is_some() && self.settings.is_some()
     }
 
-    fn send(&mut self, address: &PyTuple, bytes: &PyBytes) -> PyResult<()> {
+    fn send(&mut self, address: &Bound<'_, PyTuple>, bytes: &Bound<'_, PyBytes>) -> PyResult<()> {
         let socket_addr = parse_address(address)?;
         let packet = bytes.as_bytes().to_vec();
         trace!("Sending packet with {} bytes to {}", packet.len(), socket_addr);
         self.send_to(packet, socket_addr)
     }
 
-    fn send_cell(&mut self, address: &PyTuple, bytes: &PyBytes) -> PyResult<()> {
+    fn send_cell(&mut self, address: &Bound<'_, PyTuple>, bytes: &Bound<'_, PyBytes>) -> PyResult<()> {
         let socket_addr = parse_address(address)?;
         let packet = bytes.as_bytes().to_vec();
         let guard = self.settings.clone().unwrap().load();
@@ -457,7 +464,8 @@ impl Endpoint {
                 0 => Direction::Forward,
                 _ => Direction::Backward,
             };
-            let hop = py_relay.getattr(py, "hop")?.into_ref(py);
+            let binding = py_relay.getattr(py, "hop")?;
+            let hop = binding.bind(py);
             relay.peer = addr_from_hop(&hop)?;
             relay.keys.push(keys_from_hop(&hop)?);
             relay.rendezvous_relay = py_relay.getattr(py, "rendezvous_relay")?.extract::<bool>(py)?;
@@ -481,7 +489,8 @@ impl Endpoint {
         let mut exit = ExitSocket::new(circuit_id);
 
         Python::with_gil(|py| {
-            let hop = py_exit.getattr(py, "hop")?.into_ref(py);
+            let binding = py_exit.getattr(py, "hop")?;
+            let hop = binding.bind(py);
             exit.peer = addr_from_hop(&hop)?;
             exit.keys.push(keys_from_hop(&hop)?);
             self.exit_sockets.lock().unwrap().insert(exit.circuit_id, exit);
@@ -532,7 +541,7 @@ impl Endpoint {
 
                 settings.load().handle.spawn(async move {
                     match cloned_socket.send_to(&packet, address).await {
-                        Ok(_) => {cloned_stats.lock().unwrap().add_up(&packet, packet.len())}
+                        Ok(_) => cloned_stats.lock().unwrap().add_up(&packet, packet.len()),
                         Err(e) => error!("Could not send packet to {}: {}", address, e.to_string()),
                     };
                 });
@@ -545,7 +554,7 @@ impl Endpoint {
 
 #[pymodule]
 #[pyo3(name = "rust_endpoint")]
-pub fn ipv8_rust_tunnels(py: Python, module: &PyModule) -> PyResult<()> {
+pub fn ipv8_rust_tunnels(py: Python, module: &Bound<'_, PyModule>) -> PyResult<()> {
     env_logger::init();
     module.add("RustError", py.get_type::<RustError>())?;
     module.add_class::<Endpoint>()?;
@@ -557,7 +566,7 @@ fn set_circuit_keys(circuit: &mut Circuit, py_circuit: &PyObject) -> PyResult<()
 
     Python::with_gil(|py| {
         let hops = py_circuit.getattr(py, "_hops")?;
-        let hops_list = hops.downcast::<PyList>(py)?;
+        let hops_list = hops.downcast_bound::<PyList>(py)?;
         for hop in hops_list {
             circuit.keys.push(keys_from_hop(&hop)?);
         }
@@ -568,7 +577,7 @@ fn set_circuit_keys(circuit: &mut Circuit, py_circuit: &PyObject) -> PyResult<()
 
         let hs_keys = py_circuit.getattr(py, "hs_session_keys")?;
         if !hs_keys.is_none(py) {
-            circuit.hs_keys = vec![create_session_keys(&hs_keys.as_ref(py))?];
+            circuit.hs_keys = vec![create_session_keys(&hs_keys.bind(py))?];
         }
         circuit.goal_hops = py_circuit.getattr(py, "goal_hops")?.extract::<u8>(py)?;
         circuit.circuit_type = match py_circuit.getattr(py, "ctype")?.extract::<String>(py)?.as_str() {
@@ -581,16 +590,16 @@ fn set_circuit_keys(circuit: &mut Circuit, py_circuit: &PyObject) -> PyResult<()
     })
 }
 
-fn addr_from_hop(hop: &PyAny) -> PyResult<SocketAddr> {
+fn addr_from_hop(hop: &Bound<'_, PyAny>) -> PyResult<SocketAddr> {
     let address = hop.getattr("peer")?.getattr("address")?;
-    parse_address(address)
+    parse_address(&address)
 }
 
-fn keys_from_hop(hop: &PyAny) -> PyResult<SessionKeys> {
-    create_session_keys(hop.getattr("keys")?)
+fn keys_from_hop(hop: &Bound<'_, PyAny>) -> PyResult<SessionKeys> {
+    create_session_keys(&hop.getattr("keys")?)
 }
 
-fn create_session_keys(keys: &PyAny) -> PyResult<SessionKeys> {
+fn create_session_keys(keys: &Bound<'_, PyAny>) -> PyResult<SessionKeys> {
     Ok(SessionKeys {
         key_forward: keys.getattr("key_forward")?.extract::<Vec<u8>>()?,
         key_backward: keys.getattr("key_backward")?.extract::<Vec<u8>>()?,
@@ -618,7 +627,7 @@ fn set_stats(
     })
 }
 
-fn parse_address(address: &PyAny) -> PyResult<SocketAddr> {
+fn parse_address(address: &Bound<'_, PyAny>) -> PyResult<SocketAddr> {
     let ip = address.get_item(0)?.extract::<String>()?;
     let port = address.get_item(1)?.extract::<u16>()?;
     match ip.parse::<IpAddr>() {

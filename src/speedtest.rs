@@ -60,7 +60,7 @@ pub async fn run_speedtest(
     tokio::time::sleep(Duration::from_millis(timeout_ms.try_into().unwrap())).await;
     recv_task.abort();
     let _ =
-        Python::with_gil(|py| callback.call1(py, (results.lock().unwrap().clone().into_py_dict(py),)));
+        Python::with_gil(|py| callback.call1(py, (results.lock().unwrap().clone().into_py_dict(py)?,)));
 }
 
 pub async fn receive_and_broadcast(

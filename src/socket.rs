@@ -19,7 +19,7 @@ use crate::socks5::UDPAssociate;
 use crate::stats::Stats;
 use crate::util::Result;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TunnelSettings {
     pub prefix: Vec<u8>,
     pub prefixes: Vec<Vec<u8>>,
@@ -40,6 +40,18 @@ impl TunnelSettings {
             exit_addr: "[::]:0".parse().unwrap(),
             callback,
             handle,
+        }
+    }
+
+    pub fn clone(settings: Arc<TunnelSettings>, py: Python<'_>) -> Self {
+        TunnelSettings {
+            prefix: settings.prefix.clone(),
+            prefixes: settings.prefixes.clone(),
+            max_relay_early: settings.max_relay_early.clone(),
+            peer_flags: settings.peer_flags.clone(),
+            exit_addr: settings.exit_addr.clone(),
+            callback: settings.callback.clone_ref(py),
+            handle: settings.handle.clone(),
         }
     }
 }

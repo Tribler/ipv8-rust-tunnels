@@ -9,7 +9,11 @@ use socks5_proto::Address;
 use tokio::{net::UdpSocket, task::JoinHandle};
 
 use crate::{
-    crypto::{Direction, SessionKeys}, payload, socket::TunnelSettings, stats::Stats, util
+    crypto::{Direction, SessionKeys},
+    payload,
+    socket::TunnelSettings,
+    stats::Stats,
+    util,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -145,7 +149,7 @@ impl ExitSocket {
                         Ok(n) => {
                             stats.lock().unwrap().add_up(&cell, n);
                             debug!("Forwarded packet from {} to {}", socket_addr, circuit_id)
-                        },
+                        }
                         Err(_) => error!("Could not tunnel cell for exit {}", circuit_id),
                     };
                 }
