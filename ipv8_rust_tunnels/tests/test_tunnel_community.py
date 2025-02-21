@@ -1,7 +1,9 @@
 import unittest
+from unittest.mock import Mock
 
 from ipv8_rust_tunnels.endpoint import RustEndpoint
 
+from ipv8.messaging.interfaces.endpoint import EndpointListener
 from ipv8.messaging.interfaces.udp.endpoint import UDPv4Address
 from ipv8.test.messaging.anonymization.test_community import TestTunnelCommunity
 from ipv8.test.messaging.anonymization.test_hiddenservices import TestHiddenServices
@@ -25,6 +27,12 @@ def create_node(org, *args, **kwargs):  # noqa: ANN201, ANN002, ANN001, D103
     ep.setup_tunnels(overlay, overlay.settings)
     ep.remove_listener(ipv8.overlay)
     ep.add_prefix_listener(ipv8.overlay, overlay.get_prefix())
+
+    # Some unittests use prefixes that we don't want blocked. So, we add a fake EndpointListener.
+    mock = Mock()
+    mock.__class__ = EndpointListener
+    ep.add_prefix_listener(mock, b'\x00' * 22)
+    ep.add_prefix_listener(mock, b'\x00\x01' + b'\x00' * 20)
 
     overlay.circuits = ep.circuits
     overlay.relay_from_to = ep.relays
