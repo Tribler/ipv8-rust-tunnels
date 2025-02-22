@@ -558,6 +558,7 @@ pub fn ipv8_rust_tunnels(py: Python, module: &Bound<'_, PyModule>) -> PyResult<(
     env_logger::init();
     module.add("RustError", py.get_type::<RustError>())?;
     module.add_class::<Endpoint>()?;
+    module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
 
