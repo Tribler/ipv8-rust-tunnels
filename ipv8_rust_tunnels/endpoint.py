@@ -13,6 +13,7 @@ import asyncio
 import ipv8_rust_tunnels.rust_endpoint as rust
 
 from ipv8.messaging.anonymization.crypto import CryptoEndpoint
+from ipv8.messaging.interfaces.endpoint import EndpointListener
 from ipv8.messaging.interfaces.network_stats import NetworkStat
 from ipv8.messaging.interfaces.udp.endpoint import Endpoint, EndpointClosedException, UDPv4Address
 from ipv8.taskmanager import TaskManager
@@ -249,11 +250,12 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         self.bytes_up = 0
         self.bytes_down = 0
 
-    def run_speedtest(self, target_addr: str, associate_port: int, num_packets: int, request_size: int,
-                       response_size: int, timeout_ms: int, window_size: int, callback: Callable) -> None:
+    def run_speedtest(self, circuit_id: int, test_time: int, request_size: int,
+                      response_size: int, target_rtt: int, callback: Callable, callback_interval: int = 0) -> None:
         """
-        Perform a TunnelCommunity speedtest. Connects to an existing UDP associate
-        port and sends test messages to a given target address.
+        Perform a TunnelCommunity speedtest.
         """
-        self.rust_ep.run_speedtest(target_addr, associate_port, num_packets, request_size,
-                                   response_size, timeout_ms, window_size, callback)
+        def callback_threadsafe(*args):
+            self.loop.call_soon_threadsafe(callback, *args)
+        return self.rust_ep.run_speedtest(circuit_id, test_time, request_size,
+                                          response_size, target_rtt, callback_threadsafe, callback_interval)

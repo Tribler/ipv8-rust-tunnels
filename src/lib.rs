@@ -207,26 +207,35 @@ impl Endpoint {
 
     fn run_speedtest(
         &mut self,
-        server_addr: String,
-        associate_port: u16,
-        num_packets: usize,
+        circuit_id: u32,
+        test_time: u16,
         request_size: u16,
         response_size: u16,
-        timeout_ms: usize,
-        window_size: usize,
+        target_rtt: u16,
         callback: PyObject,
+        callback_interval: u16,
     ) -> PyResult<()> {
-        let settings = self.settings.clone().unwrap().clone();
-        settings.load().handle.spawn(speedtest::run_speedtest(
-            server_addr,
-            associate_port,
-            num_packets,
+        let Some(settings) = &self.settings else {
+            return Err(RustError::new_err("No settings available"));
+        };
+
+        let Some(socket) = self.socket.clone() else {
+            return Err(RustError::new_err("Socket is not open"));
+        };
+
+        settings.load().handle.spawn(speedtest::run_test(
+            settings.clone(),
+            circuit_id,
+            self.circuits.clone(),
+            socket,
+            test_time,
             request_size,
             response_size,
-            timeout_ms,
-            window_size,
+            target_rtt,
             callback,
+            callback_interval,
         ));
+
         Ok(())
     }
 
