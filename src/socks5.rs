@@ -1,5 +1,5 @@
 use arc_swap::ArcSwap;
-use rand::seq::SliceRandom;
+use rand::prelude::IndexedRandom;
 use socks5_proto::{Address, UdpHeader};
 use std::io::Cursor;
 use std::net::Ipv4Addr;
@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use crate::payload;
 use crate::routing::circuit::{Circuit, CircuitType};
 use crate::socket::TunnelSettings;
+use crate::stats::Stats;
 
 #[derive(Debug, Clone)]
 pub struct UDPAssociate {
@@ -23,6 +24,7 @@ pub struct UDPAssociate {
 pub async fn handle_associate(
     associated_socket: Arc<UdpSocket>,
     tunnel_socket: Arc<UdpSocket>,
+    stats: Arc<Mutex<Stats>>,
     circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
     settings: Arc<ArcSwap<TunnelSettings>>,
     hops: u8,
@@ -60,7 +62,10 @@ pub async fn handle_associate(
                 };
 
                 match tunnel_socket.send_to(&cell, target).await {
-                    Ok(_) => debug!("Forwarded data from SOCKS5 to circuit {}", circuit_id),
+                    Ok(_) => {
+                        stats.lock().unwrap().add_up(&cell, cell.len());
+                        debug!("Forwarded data from SOCKS5 to circuit {}", circuit_id);
+                    }
                     Err(_) => error!("Could not tunnel cell for circuit {}", circuit_id),
                 };
             }
@@ -150,7 +155,7 @@ fn select_circuit(
         Some(cid) => Some(*cid),
         None => {
             let options = get_options(&socket, &circuits);
-            let Some(&cid) = options.choose(&mut rand::thread_rng()) else {
+            let Some(&cid) = options.choose(&mut rand::rng()) else {
                 return None;
             };
             addr_to_cid.insert(address.clone(), cid);

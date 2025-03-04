@@ -13,6 +13,8 @@ import asyncio
 import ipv8_rust_tunnels.rust_endpoint as rust
 
 from ipv8.messaging.anonymization.crypto import CryptoEndpoint
+from ipv8.messaging.interfaces.endpoint import EndpointListener
+from ipv8.messaging.interfaces.network_stats import NetworkStat
 from ipv8.messaging.interfaces.udp.endpoint import Endpoint, EndpointClosedException, UDPv4Address
 from ipv8.taskmanager import TaskManager
 from ipv8.util import succeed
@@ -65,6 +67,24 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         
         self.register_task('update_stats', self.update_stats, interval=1)
 
+    def add_prefix_listener(self, listener: EndpointListener, prefix: bytes) -> None:
+        """
+        Add an EndpointListener to our listeners, only triggers on packets with a specific prefix.
+
+        :raises: IllegalEndpointListenerError if the provided listener is not an EndpointListener
+        """
+        super().add_prefix_listener(listener, prefix)
+        if self.rust_ep.is_open():
+            self.rust_ep.set_prefixes(list(self._prefix_map.keys()))
+
+    def remove_listener(self, listener: EndpointListener) -> None:
+        """
+        Remove a listener from our listeners, if it is registered.
+        """
+        super().remove_listener(listener)
+        if self.rust_ep.is_open():
+            self.rust_ep.set_prefixes(list(self._prefix_map.keys()))
+
     def update_stats(self) -> None:
         """
         Updates the statistics of the routing objects using the most recent data from Rust.
@@ -77,6 +97,25 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
 
         for exit_socket in self.exit_sockets.values():
             self.rust_ep.update_exit_stats(exit_socket.circuit_id, exit_socket)
+
+    def get_statistics(self, prefix: bytes) -> dict[int, NetworkStat]:
+        """
+        Get the message statistics per message identifier for the given prefix.
+        """
+        result = {}
+        for msg_id, counters in self.rust_ep.get_message_statistics(prefix).items():
+            stat = result[msg_id] = NetworkStat(msg_id)
+            stat.num_up = counters[0]
+            stat.num_down = counters[2]
+            stat.bytes_up = counters[1]
+            stat.bytes_down = counters[3]
+        return result
+
+    def enable_community_statistics(self, community_prefix: bytes, enabled: bool) -> None:
+        """
+        Start tracking stats for packets with the given prefix.
+        """
+        pass
 
     def setup_tunnels(self, tunnel_community: TunnelCommunity, settings: TunnelSettings) -> None:
         """
@@ -93,6 +132,7 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         """
         if self.prefix and self.settings and self.is_open():
             self.rust_ep.set_prefix(self.prefix)
+            self.rust_ep.set_prefixes(list(self._prefix_map.keys()))
             self.rust_ep.set_max_relay_early(self.settings.max_relay_early)
             self.rust_ep.set_peer_flags(self.settings.peer_flags)
 
@@ -210,11 +250,12 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         self.bytes_up = 0
         self.bytes_down = 0
 
-    def run_speedtest(self, target_addr: str, associate_port: int, num_packets: int, request_size: int,
-                       response_size: int, timeout_ms: int, window_size: int, callback: Callable) -> None:
+    def run_speedtest(self, circuit_id: int, test_time: int, request_size: int,
+                      response_size: int, target_rtt: int, callback: Callable, callback_interval: int = 0) -> None:
         """
-        Perform a TunnelCommunity speedtest. Connects to an existing UDP associate
-        port and sends test messages to a given target address.
+        Perform a TunnelCommunity speedtest.
         """
-        self.rust_ep.run_speedtest(target_addr, associate_port, num_packets, request_size,
-                                   response_size, timeout_ms, window_size, callback)
+        def callback_threadsafe(*args):
+            self.loop.call_soon_threadsafe(callback, *args)
+        return self.rust_ep.run_speedtest(circuit_id, test_time, request_size,
+                                          response_size, target_rtt, callback_threadsafe, callback_interval)

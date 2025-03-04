@@ -1,165 +1,172 @@
 use std::{
     collections::HashMap,
-    io::Cursor,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use arc_swap::ArcSwap;
 use pyo3::{types::IntoPyDict, PyObject, Python};
 use rand::{Rng, RngCore};
-use socks5_proto::{Address, UdpHeader};
-use tokio::{
-    net::UdpSocket,
-    sync::{broadcast, oneshot, OwnedSemaphorePermit, Semaphore},
-};
+use tokio::{net::UdpSocket, sync::broadcast};
 
-use crate::util;
+use crate::{routing::circuit::Circuit, socket::TunnelSettings, util::get_time_ms};
 
-pub async fn run_speedtest(
-    server_addr: String,
-    associate_port: u16,
-    num_packets: usize,
+pub async fn run_test(
+    settings: Arc<ArcSwap<TunnelSettings>>,
+    circuit_id: u32,
+    circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
+    socket: Arc<UdpSocket>,
+    test_time: u16,
     request_size: u16,
     response_size: u16,
-    timeout_ms: usize,
-    window_size: usize,
+    target_rtt: u16,
     callback: PyObject,
+    callback_interval: u16,
 ) {
-    let (socket_tx, socket_rx) = oneshot::channel();
-
-    let msg_tx = tokio::sync::broadcast::Sender::new(window_size);
-    let recv_task = tokio::spawn(receive_and_broadcast(associate_port, socket_tx, msg_tx.clone()));
-    let socket = match socket_rx.await {
-        Ok(socket) => socket,
-        Err(e) => {
-            error!("Error while receiving speedtest socket: {}. Aborting test.", e);
-            return;
-        }
-    };
-
-    let semaphore = Arc::new(Semaphore::new(window_size));
+    let rtts = Arc::new(Mutex::new(Vec::<u16>::new()));
     let results = Arc::new(Mutex::new(HashMap::new()));
 
-    debug!("Sending packets with window={}", window_size);
-
-    for _ in 0..num_packets {
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
-        tokio::spawn(send_and_wait(
-            Address::SocketAddress(server_addr.parse().unwrap()),
-            socket.clone(),
-            request_size,
-            response_size,
-            timeout_ms,
-            msg_tx.subscribe(),
+    let mut cb_task = None;
+    if callback_interval > 0 {
+        cb_task = Some(settings.load().handle.spawn(cb_loop(
+            Python::with_gil(|py| callback.clone_ref(py)),
+            callback_interval,
             results.clone(),
-            permit,
-        ));
+        )));
     }
 
-    debug!("All {} packets sent!", num_packets);
-    tokio::time::sleep(Duration::from_millis(timeout_ms.try_into().unwrap())).await;
+    let recv_task = settings.load().handle.spawn(receive_loop(
+        settings.load().test_channel.clone(),
+        results.clone(),
+        rtts.clone(),
+    ));
+
+    debug!("Testing circuit {}..", circuit_id);
+    let prefix = settings.load().prefix.clone();
+    let send_task = settings.load().handle.spawn(send_loop(
+        circuit_id,
+        circuits.clone(),
+        prefix,
+        socket.clone(),
+        request_size,
+        response_size,
+        target_rtt,
+        results.clone(),
+        rtts.clone(),
+    ));
+
+    debug!("Stopping test for circuit {}..", circuit_id);
+    tokio::time::sleep(Duration::from_millis((test_time).into())).await;
+    send_task.abort();
     recv_task.abort();
-    let _ =
-        Python::with_gil(|py| callback.call1(py, (results.lock().unwrap().clone().into_py_dict(py),)));
+    if let Some(task) = cb_task {
+        task.abort();
+    };
+
+    tokio::time::sleep(Duration::from_millis((target_rtt * 2).into())).await;
+    let _ = Python::with_gil(|py| {
+        callback.call1(py, (results.lock().unwrap().clone().into_py_dict(py)?, true))
+    });
+    debug!("Finished test for circuit {}", circuit_id);
 }
 
-pub async fn receive_and_broadcast(
-    associate_port: u16,
-    socket_tx: oneshot::Sender<Arc<UdpSocket>>,
-    tx: broadcast::Sender<(u32, usize)>,
+pub async fn receive_loop(
+    msg_tx: broadcast::Sender<(u32, usize)>,
+    results: Arc<Mutex<HashMap<u32, [usize; 4]>>>,
+    rtts: Arc<Mutex<Vec<u16>>>,
 ) {
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-    let _ = socket.connect(format!("127.0.0.1:{}", associate_port)).await;
-    let _ = socket_tx.send(socket.clone());
+    let mut msg_rx = msg_tx.subscribe();
 
-    let mut buf = [0; 2048];
     loop {
-        match socket.recv(&mut buf).await {
-            Ok(n) => {
-                let mut packet = &buf[..n];
-                // Strip SOCKS5 header
-                let Ok(header) = UdpHeader::read_from(&mut Cursor::new(packet)).await else {
-                    error!("Failed to decode SOCKS5 header address");
-                    continue;
+        match msg_rx.recv().await {
+            Ok((tid, n)) => {
+                debug!("Received response for request {}", tid);
+                let mut rtt = 0;
+                if let Some(result) = results.lock().unwrap().get_mut(&tid) {
+                    result[2] = get_time_ms() as usize;
+                    result[3] = n;
+                    rtt = (result[2] - result[0]) as u16;
                 };
-                packet = &packet[header.serialized_len()..];
-
-                // Payload format: 'd' + 4-byte transaction ID + the exit IP + payload + 'e'
-                if packet.len() < 13 {
-                    error!("Dropping packet (response too small");
-                    continue;
+                if rtt != 0 {
+                    rtts.lock().unwrap().push(rtt);
                 }
-
-                // Broadcast transaction ID
-                let tid = u32::from_be_bytes(packet[1..5].try_into().unwrap());
-                let _ = tx.send((tid, n));
-                debug!("Broadcasting response for request {}", tid);
             }
-            Err(ref e) if e.kind() == tokio::io::ErrorKind::WouldBlock => {}
-            Err(e) => error!("Error while reading socket: {}", e),
-        }
+            Err(_) => {
+                error!("Error while receiving response");
+            }
+        };
     }
 }
 
-pub async fn send_and_wait(
-    target: Address,
+pub async fn send_loop(
+    circuit_id: u32,
+    circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
+    prefix: Vec<u8>,
     socket: Arc<UdpSocket>,
     request_size: u16,
     response_size: u16,
-    timeout_ms: usize,
-    mut rx: broadcast::Receiver<(u32, usize)>,
+    target_rtt: u16,
     results: Arc<Mutex<HashMap<u32, [usize; 4]>>>,
-    _: OwnedSemaphorePermit,
+    rtts: Arc<Mutex<Vec<u16>>>,
 ) {
     let mut random_data = [0; 2048];
-    rand::thread_rng().fill_bytes(&mut random_data);
-    let payload = &random_data[..request_size as usize];
-    let tid: u32 = rand::thread_rng().gen();
-    let header = UdpHeader::new(0, target.clone());
-    let mut socks5_pkt = Vec::with_capacity(header.serialized_len());
-    if let Err(e) = header.write_to(&mut socks5_pkt).await {
-        error!("Error while writing SOCKS5 header: {}", e);
-        return;
-    };
-    socks5_pkt.extend_from_slice(&[b'd']);
-    socks5_pkt.extend_from_slice(&tid.to_be_bytes());
-    socks5_pkt.extend_from_slice(&response_size.to_be_bytes());
-    socks5_pkt.extend_from_slice(&payload);
-    socks5_pkt.extend_from_slice(&[b'e']);
+    rand::rng().fill_bytes(&mut random_data);
 
-    match socket.send(&socks5_pkt).await {
-        Ok(size) => {
-            debug!("Sent request {} ({} bytes)", tid, size);
+    loop {
+        let mut sum: u16 = 0;
+        if rtts.lock().unwrap().len() > 10 {
+            sum = rtts.lock().unwrap().iter().rev().take(10).sum();
+        }
+        if sum / 10 > target_rtt {
+            tokio::time::sleep(Duration::from_millis(0)).await;
+        }
+
+        let tid: u32 = rand::rng().random();
+
+        let test_request = [
+            prefix.to_vec(),
+            vec![0],
+            circuit_id.to_be_bytes().to_vec(),
+            vec![0, 0, 21],
+            tid.to_be_bytes().to_vec(),
+            response_size.to_be_bytes().to_vec(),
+            random_data[..request_size as usize].to_vec(),
+        ]
+        .concat();
+
+        let (encrypted, target) = match circuits.lock().unwrap().get_mut(&circuit_id) {
+            Some(circuit) => {
+                let Ok(encrypted) = circuit.encrypt_outgoing_cell(test_request, 8) else {
+                    error!("Can't encrypt cell for circuit {}", circuit_id);
+                    break;
+                };
+                (encrypted, circuit.peer.clone())
+            }
+            None => {
+                error!("Can't find circuit {}", circuit_id);
+                break;
+            }
+        };
+
+        if let Ok(n) = socket.send_to(&encrypted, target).await {
             results
                 .lock()
                 .unwrap()
-                .insert(tid, [util::get_time_ms() as usize, size, 0, 0]);
-            let wait_for_tid = async {
-                loop {
-                    match rx.recv().await {
-                        Ok((tid_received, n)) => {
-                            debug!("Received {}, looking for {}", tid_received, tid);
-                            if tid_received == tid {
-                                debug!("Received response for request {}", tid);
-                                if let Some(result) = results.lock().unwrap().get_mut(&tid) {
-                                    result[2] = util::get_time_ms() as usize;
-                                    result[3] = n;
-                                    break;
-                                };
-                            }
-                        }
-                        Err(_) => {}
-                    }
-                }
-            };
-            if let Err(_) =
-                tokio::time::timeout(Duration::from_millis(timeout_ms.try_into().unwrap()), wait_for_tid)
-                    .await
-            {
-                warn!("Request {} timedout", tid);
-            }
+                .insert(tid, [get_time_ms() as usize, n, 0, 0]);
         }
-        Err(ref e) if e.kind() == tokio::io::ErrorKind::WouldBlock => {}
-        Err(e) => error!("Error while writing to socket: {}", e),
-    };
+    }
+}
+
+pub async fn cb_loop(
+    callback: PyObject,
+    cb_interval: u16,
+    results: Arc<Mutex<HashMap<u32, [usize; 4]>>>,
+) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(cb_interval as u64)).await;
+        debug!("Calling Python callback (interval={})", cb_interval);
+        let _ = Python::with_gil(|py| {
+            callback.call1(py, (results.lock().unwrap().clone().into_py_dict(py)?, false))
+        });
+    }
 }

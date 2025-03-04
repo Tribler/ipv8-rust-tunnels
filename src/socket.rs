@@ -2,6 +2,7 @@ use arc_swap::{ArcSwap, ArcSwapAny};
 use map_macro::hash_set;
 use pyo3::types::PyBytes;
 use pyo3::{PyObject, Python};
+use rand::RngCore;
 use socks5_proto::Address;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -16,15 +17,18 @@ use crate::routing::circuit::{Circuit, CircuitType};
 use crate::routing::exit::{ExitSocket, PeerFlag};
 use crate::routing::relay::RelayRoute;
 use crate::socks5::UDPAssociate;
+use crate::stats::Stats;
 use crate::util::Result;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TunnelSettings {
     pub prefix: Vec<u8>,
+    pub prefixes: Vec<Vec<u8>>,
     pub max_relay_early: u8,
     pub peer_flags: HashSet<PeerFlag>,
     pub exit_addr: SocketAddr,
     pub callback: PyObject,
+    pub test_channel: tokio::sync::broadcast::Sender<(u32, usize)>,
     pub handle: Handle,
 }
 
@@ -32,17 +36,33 @@ impl TunnelSettings {
     pub fn new(callback: PyObject, handle: Handle) -> Self {
         TunnelSettings {
             prefix: vec![0; 22],
+            prefixes: vec![],
             max_relay_early: 8,
             peer_flags: hash_set![PeerFlag::Relay, PeerFlag::SpeedTest],
             exit_addr: "[::]:0".parse().unwrap(),
             callback,
+            test_channel: tokio::sync::broadcast::Sender::<(u32, usize)>::new(200),
             handle,
+        }
+    }
+
+    pub fn clone(settings: Arc<TunnelSettings>, py: Python<'_>) -> Self {
+        TunnelSettings {
+            prefix: settings.prefix.clone(),
+            prefixes: settings.prefixes.clone(),
+            max_relay_early: settings.max_relay_early.clone(),
+            peer_flags: settings.peer_flags.clone(),
+            exit_addr: settings.exit_addr.clone(),
+            callback: settings.callback.clone_ref(py),
+            test_channel: settings.test_channel.clone(),
+            handle: settings.handle.clone(),
         }
     }
 }
 
 pub struct TunnelSocket {
     socket: Arc<UdpSocket>,
+    stats: Arc<Mutex<Stats>>,
     circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
     relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
     exit_sockets: Arc<Mutex<HashMap<u32, ExitSocket>>>,
@@ -53,6 +73,7 @@ pub struct TunnelSocket {
 impl TunnelSocket {
     pub fn new(
         socket: Arc<UdpSocket>,
+        stats: Arc<Mutex<Stats>>,
         circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
         relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
         exit_sockets: Arc<Mutex<HashMap<u32, ExitSocket>>>,
@@ -61,6 +82,7 @@ impl TunnelSocket {
     ) -> Self {
         TunnelSocket {
             socket,
+            stats,
             circuits,
             relays,
             exit_sockets,
@@ -77,11 +99,17 @@ impl TunnelSocket {
             match self.socket.recv_from(&mut buf).await {
                 Ok((n, addr)) => {
                     let packet = &buf[..n];
+                    self.stats.lock().unwrap().add_down(packet, n);
+
                     let guard = ArcSwapAny::load(&self.settings);
 
                     if !payload::is_cell(&guard.prefix, &packet) {
-                        trace!("Handover packet with {} bytes from {} to Python", n, addr);
-                        self.call_python(&guard.callback, &addr, packet);
+                        if payload::has_prefixes(&guard.prefixes, packet) {
+                            trace!("Handover packet with {} bytes from {} to Python", n, addr);
+                            self.call_python(&guard.callback, &addr, packet);
+                        } else {
+                            trace!("Dropping packet with {} bytes from {} (unknown prefix).", n, addr);
+                        }
                         continue;
                     }
 
@@ -144,60 +172,61 @@ impl TunnelSocket {
         addr: SocketAddr,
         circuit_id: u32,
     ) -> Result<usize> {
-        let result = match self.circuits.lock().unwrap().get_mut(&circuit_id) {
-            Some(circuit) => {
-                let guard = ArcSwap::load(&self.settings);
-                let cell = circuit.decrypt_incoming_cell(packet, guard.max_relay_early)?;
-                let session_hops = match circuit.circuit_type {
-                    CircuitType::RPDownloader => circuit.goal_hops - 1,
-                    CircuitType::RPSeeder => circuit.goal_hops,
-                    _ => 0,
-                };
-                if cell[29] != 1
-                    || payload::has_prefix(&guard.prefix, &cell[30..])
-                    || (circuit.socket.is_none() && session_hops == 0)
-                {
-                    Some((cell, true, session_hops))
-                } else {
-                    Some((circuit.process_incoming_cell(cell)?, false, session_hops))
+        let guard = ArcSwap::load(&self.settings);
+        let (data, cell_id, session_hops, to_python) =
+            match self.circuits.lock().unwrap().get_mut(&circuit_id) {
+                Some(circuit) => {
+                    let mut data = circuit.decrypt_incoming_cell(packet, guard.max_relay_early)?;
+                    let session_hops = match circuit.circuit_type {
+                        CircuitType::RPDownloader => circuit.goal_hops - 1,
+                        CircuitType::RPSeeder => circuit.goal_hops,
+                        _ => 0,
+                    };
+                    let cell_id = data[29];
+                    let to_python = (data.len() > 52 && payload::has_prefix(&guard.prefix, &data[30..]))
+                        || (circuit.socket.is_none() && session_hops == 0);
+                    if !to_python && cell_id == 1 {
+                        data = circuit.process_incoming_cell(data)?
+                    }
+                    (data, cell_id, session_hops, to_python)
                 }
-            }
-            None => None,
-        };
+                None => return Ok(0),
+            };
 
-        if let Some((data, to_python, session_hops)) = result {
-            let guard = ArcSwap::load(&self.settings);
-            if to_python {
-                trace!("Handover cell({}) for circuit {} to Python", data[29], circuit_id);
-                self.call_python(&guard.callback, &addr, &data);
+        if cell_id == 21 {
+            return self.on_test_request(addr, circuit_id, &data).await;
+        } else if cell_id == 22 {
+            return self.on_test_response(addr, circuit_id, &data).await;
+        } else if to_python || cell_id != 1 {
+            trace!("Handover cell({}) for circuit {} to Python", cell_id, circuit_id);
+            self.call_python(&guard.callback, &addr, &data);
+            return Ok(data.len());
+        }
+
+        let Some(socket) = self.get_socket_for_circuit(circuit_id) else {
+            // It could be that we're getting incoming data from an e2e circuit and we don't have associated
+            // the circuit with a socket yet (meaning that we haven't sent any traffic). If this is the case,
+            // send the packet to all UDP associates with the correct hop count.
+            if session_hops != 0 {
+                for associate in self.udp_associates.lock().unwrap().values() {
+                    if associate.hops != session_hops || associate.default_remote.is_none() {
+                        continue;
+                    }
+                    let default_remote = associate.default_remote.unwrap();
+                    match associate.socket.try_send_to(&data, default_remote) {
+                        Ok(_) => {}
+                        Err(e) => error!("Error while sending e2e packet to SOCKS5: {}", e),
+                    };
+                }
                 return Ok(data.len());
             }
-            let Some(socket) = self.get_socket_for_circuit(circuit_id) else {
-                // It could be that we're getting incoming data from an e2e circuit and we don't have associated
-                // the circuit with a socket yet (meaning that we haven't sent any traffic). If this is the case,
-                // send the packet to all UDP associates with the correct hop count.
-                if session_hops != 0 {
-                    for associate in self.udp_associates.lock().unwrap().values() {
-                        if associate.hops != session_hops || associate.default_remote.is_none() {
-                            continue;
-                        }
-                        let default_remote = associate.default_remote.unwrap();
-                        match associate.socket.try_send_to(&data, default_remote) {
-                            Ok(_) => {}
-                            Err(e) => error!("Error while sending e2e packet to SOCKS5: {}", e),
-                        };
-                    }
-                    return Ok(data.len());
-                }
-                // This shouldn't really happen, but return an error anyway.
-                return Err(format!("No socket available for circuit {}", circuit_id));
-            };
-            return match socket.send(&data).await {
-                Ok(bytes) => Ok(bytes),
-                Err(e) => Err(format!("Failed to send data: {}", e)),
-            };
-        }
-        Ok(0)
+            // This shouldn't really happen, but return an error anyway.
+            return Err(format!("No socket available for circuit {}", circuit_id));
+        };
+        return match socket.send(&data).await {
+            Ok(bytes) => Ok(bytes),
+            Err(e) => Err(format!("Failed to send data: {}", e)),
+        };
     }
 
     async fn handle_cell_for_relay(&self, packet: &[u8], circuit_id: u32) -> Result<usize> {
@@ -221,7 +250,10 @@ impl TunnelSocket {
                 data = self.convert_hidden_services(packet, circuit_id)?;
             }
             return match self.socket.send_to(&data, target).await {
-                Ok(bytes) => Ok(bytes),
+                Ok(bytes) => {
+                    self.stats.lock().unwrap().add_up(&data, data.len());
+                    Ok(bytes)
+                }
                 Err(e) => Err(format!("Failed to send data: {}", e)),
             };
         }
@@ -234,45 +266,46 @@ impl TunnelSocket {
         addr: SocketAddr,
         circuit_id: u32,
     ) -> Result<usize> {
-        let result = match self.exit_sockets.lock().unwrap().get_mut(&circuit_id) {
-            Some(exit) => {
-                let guard = ArcSwap::load(&self.settings);
-                let cell = exit.decrypt_incoming_cell(packet, guard.max_relay_early)?;
-                if cell[29] != 1 || payload::has_prefix(&guard.prefix, &cell[30..]) {
-                    Some((Address::SocketAddress(addr), cell, true))
-                } else {
-                    let (target, pkt) = exit.process_incoming_cell(cell)?;
-                    Some((target, pkt, false))
-                }
-            }
-            None => None,
-        };
-
-        if let Some((target, data, to_python)) = result {
-            let guard = ArcSwap::load(&self.settings);
-            ExitSocket::check_if_allowed(&data, &guard.prefix, &guard.peer_flags)?;
-            if to_python {
-                trace!("Handover cell({}) for exit {} to Python", data[29], circuit_id);
-                self.call_python(&guard.callback, &addr, &data);
-                return Ok(data.len());
-            }
-
-            if let Some(socket) = self.get_socket_for_exit(circuit_id) {
-                let resolved_target = self.resolve(target, circuit_id).await?;
-                let ip = resolved_target.ip();
-                // Use is_global, once it is available.
-                if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
-                    // For testing purposes, allow all IPs when bound to localhost.
-                    let local_addr = self.socket.local_addr().unwrap();
-                    if !local_addr.ip().is_loopback() {
-                        return Err(format!("Address {} is not allowed. Dropping packet.", ip));
+        let guard = ArcSwap::load(&self.settings);
+        let (data, cell_id, target, to_python) =
+            match self.exit_sockets.lock().unwrap().get_mut(&circuit_id) {
+                Some(exit) => {
+                    let mut data = exit.decrypt_incoming_cell(packet, guard.max_relay_early)?;
+                    let mut target = Address::SocketAddress(addr);
+                    let cell_id = data[29];
+                    let to_python = data.len() > 52 && payload::has_prefix(&guard.prefix, &data[30..]);
+                    if !to_python && cell_id == 1 {
+                        (target, data) = exit.process_incoming_cell(data)?;
                     }
+                    (data, cell_id, target, to_python)
                 }
-                return match socket.send_to(&data, resolved_target).await {
-                    Ok(bytes) => Ok(bytes),
-                    Err(e) => Err(format!("Failed to send data to {}: {}", resolved_target, e)),
-                };
+                None => return Ok(0),
+            };
+
+        ExitSocket::check_if_allowed(&data, &guard.prefix, &guard.peer_flags)?;
+        if cell_id == 21 {
+            return self.on_test_request(addr, circuit_id, &data).await;
+        } else if to_python || cell_id != 1 {
+            trace!("Handover cell({}) for exit {} to Python", data[29], circuit_id);
+            self.call_python(&guard.callback, &addr, &data);
+            return Ok(data.len());
+        }
+
+        if let Some(socket) = self.get_socket_for_exit(circuit_id) {
+            let resolved_target = self.resolve(target, circuit_id).await?;
+            let ip = resolved_target.ip();
+            // Use is_global, once it is available.
+            if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+                // For testing purposes, allow all IPs when bound to localhost.
+                let local_addr = self.socket.local_addr().unwrap();
+                if !local_addr.ip().is_loopback() {
+                    return Err(format!("Address {} is not allowed. Dropping packet.", ip));
+                }
             }
+            return match socket.send_to(&data, resolved_target).await {
+                Ok(bytes) => Ok(bytes),
+                Err(e) => Err(format!("Failed to send data to {}: {}", resolved_target, e)),
+            };
         }
         Ok(0)
     }
@@ -312,10 +345,11 @@ impl TunnelSocket {
                 exit.open_socket(guard.exit_addr.clone());
                 let circuit_id = exit.circuit_id.clone();
                 let socket = self.socket.clone();
+                let stats = self.stats.clone();
                 let exits = self.exit_sockets.clone();
                 let settings = self.settings.clone();
                 let task = guard.handle.spawn(async move {
-                    match ExitSocket::listen_forever(socket, exits, circuit_id, settings).await {
+                    match ExitSocket::listen_forever(socket, stats, exits, circuit_id, settings).await {
                         Ok(_) => {}
                         Err(e) => error!("Error for exit {}: {}", circuit_id, e),
                     };
@@ -354,5 +388,70 @@ impl TunnelSocket {
                 Err(e) => error!("Could not call Python callback: {}", e),
             }
         });
+    }
+
+    async fn on_test_request(&self, address: SocketAddr, circuit_id: u32, cell: &[u8]) -> Result<usize> {
+        if cell.len() < 37 {
+            return Err(format!("Got bad test-request from circuit {}", circuit_id));
+        }
+        debug!("Got test-request from circuit {}", circuit_id);
+        let identifier = u32::from_be_bytes(cell[30..34].try_into().unwrap());
+        let response_size = u16::from_be_bytes(cell[34..36].try_into().unwrap());
+        let mut random_data = [0; 2048];
+        rand::rng().fill_bytes(&mut random_data);
+
+        let response = [
+            cell[..22].to_vec(),
+            vec![0],
+            circuit_id.to_be_bytes().to_vec(),
+            vec![0, 0, 22],
+            identifier.to_be_bytes().to_vec(),
+            random_data[..response_size as usize].to_vec(),
+        ]
+        .concat();
+
+        let encrypted_cell = match self.exit_sockets.lock().unwrap().get_mut(&circuit_id) {
+            Some(exit) => match exit.encrypt_outgoing_cell(response) {
+                Ok(cell) => cell,
+                Err(_) => return Err(format!("Failed to encrypt test-response for {:?}", circuit_id)),
+            },
+            None => match self.circuits.lock().unwrap().get_mut(&circuit_id) {
+                Some(circuit) => {
+                    match circuit.encrypt_outgoing_cell(response, self.settings.load().max_relay_early) {
+                        Ok(cell) => cell,
+                        Err(_) => {
+                            return Err(format!("Failed to encrypt test-response for {:?}", circuit_id))
+                        }
+                    }
+                }
+                None => return Err(format!("Unexpected test-response for {:?}", circuit_id)),
+            },
+        };
+
+        return match self.socket.send_to(&encrypted_cell, address).await {
+            Ok(bytes) => {
+                self.stats
+                    .lock()
+                    .unwrap()
+                    .add_up(&encrypted_cell, encrypted_cell.len());
+                Ok(bytes)
+            }
+            Err(e) => Err(format!("Failed to send test-response: {}", e)),
+        };
+    }
+
+    async fn on_test_response(
+        &self,
+        _address: SocketAddr,
+        circuit_id: u32,
+        cell: &[u8],
+    ) -> Result<usize> {
+        if cell.len() < 35 {
+            return Err(format!("Got bad test-response from circuit {}", circuit_id));
+        }
+        debug!("Got test-response from circuit {}", circuit_id);
+        let tid = u32::from_be_bytes(cell[30..34].try_into().unwrap());
+        let _ = self.settings.load().test_channel.send((tid, cell.len()));
+        Ok(cell.len())
     }
 }

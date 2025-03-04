@@ -90,7 +90,7 @@ pub fn swap_circuit_id(cell: &Vec<u8>, circuit_id: u32) -> Vec<u8> {
 }
 
 pub fn is_cell(prefix: &Vec<u8>, packet: &[u8]) -> bool {
-    packet.len() >= 29 && has_prefix(prefix, packet) && packet[22] == 0
+    packet.len() > 29 && has_prefix(prefix, packet) && packet[22] == 0
 }
 
 pub fn has_prefix(prefix: &[u8], packet: &[u8]) -> bool {
@@ -100,6 +100,15 @@ pub fn has_prefix(prefix: &[u8], packet: &[u8]) -> bool {
         }
     }
     true
+}
+
+pub fn has_prefixes(prefixes: &Vec<Vec<u8>>, packet: &[u8]) -> bool {
+    for prefix in prefixes.iter() {
+        if has_prefix(prefix, packet) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn decode_address(packet: &[u8], offset: usize) -> Result<(Address, usize)> {
