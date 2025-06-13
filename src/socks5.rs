@@ -55,6 +55,7 @@ pub async fn handle_associate(
                     &settings,
                     &mut addr_to_cid,
                     &buf[..size],
+                    hops,
                 )
                 .await
                 else {
@@ -80,6 +81,7 @@ async fn process_socks5_packet(
     settings: &Arc<ArcSwap<TunnelSettings>>,
     addr_to_cid: &mut HashMap<Address, u32>,
     buf: &[u8],
+    hops: u8,
 ) -> Option<(SocketAddr, Vec<u8>, u32)> {
     let header = match UdpHeader::read_from(&mut Cursor::new(buf)).await {
         Ok(header) => header,
@@ -91,8 +93,9 @@ async fn process_socks5_packet(
 
     let pkt = &buf[header.serialized_len()..].to_vec();
     let address = &header.address;
-    let Some(circuit_id) = select_circuit(address, associated_socket, circuits, addr_to_cid) else {
-        warn!("No circuits available, dropping packet");
+    let Some(circuit_id) = select_circuit(address, associated_socket, circuits, addr_to_cid, hops)
+    else {
+        warn!("No {}-hop circuits available, dropping packet", hops);
         return None;
     };
 
@@ -100,7 +103,10 @@ async fn process_socks5_packet(
         Some(circuit) => {
             if circuit.socket.is_none() {
                 circuit.socket = Some(associated_socket.clone());
-                info!("Associated socket for circuit {}", circuit_id);
+                info!(
+                    "Associated socket ({} hops) for circuit {} ({})",
+                    hops, circuit_id, circuit.goal_hops
+                );
             }
 
             let guard = settings.load();
@@ -126,6 +132,7 @@ fn select_circuit(
     socket: &Arc<UdpSocket>,
     circuits: &Arc<Mutex<HashMap<u32, Circuit>>>,
     addr_to_cid: &mut HashMap<Address, u32>,
+    hops: u8,
 ) -> Option<u32> {
     // Deal with hidden services
     if let Address::SocketAddress(SocketAddr::V4(addr)) = address {
@@ -154,7 +161,7 @@ fn select_circuit(
     match addr_to_cid.get(address) {
         Some(cid) => Some(*cid),
         None => {
-            let options = get_options(&socket, &circuits);
+            let options = get_options(&socket, &circuits, hops, 2);
             let Some(&cid) = options.choose(&mut rand::rng()) else {
                 return None;
             };
@@ -164,13 +171,25 @@ fn select_circuit(
     }
 }
 
-fn get_options(socket: &Arc<UdpSocket>, circuits: &Arc<Mutex<HashMap<u32, Circuit>>>) -> Vec<u32> {
+fn get_options(
+    socket: &Arc<UdpSocket>,
+    circuits: &Arc<Mutex<HashMap<u32, Circuit>>>,
+    hops: u8,
+    limit: u8,
+) -> Vec<u32> {
     let guard = circuits.lock().unwrap();
-    guard
+    let mut circuits: Vec<&Circuit> = guard
         .values()
         .filter(|c| {
-            c.data_ready() && (c.socket.is_none() || Arc::ptr_eq(c.socket.as_ref().unwrap(), &socket))
+            c.goal_hops == hops
+                && c.data_ready()
+                && (c.socket.is_none() || Arc::ptr_eq(c.socket.as_ref().unwrap(), &socket))
         })
+        .collect();
+    circuits.sort_by_key(|c| c.socket.is_none() as u8);
+    circuits
+        .iter()
         .map(|c| c.circuit_id)
+        .take(limit as usize)
         .collect()
 }
