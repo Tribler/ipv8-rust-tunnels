@@ -76,7 +76,7 @@ pub async fn handle_associate(
 }
 
 async fn process_socks5_packet(
-    associated_socket: &Arc<UdpSocket>,
+    socket: &Arc<UdpSocket>,
     circuits: &Arc<Mutex<HashMap<u32, Circuit>>>,
     settings: &Arc<ArcSwap<TunnelSettings>>,
     addr_to_cid: &mut HashMap<Address, u32>,
@@ -93,8 +93,7 @@ async fn process_socks5_packet(
 
     let pkt = &buf[header.serialized_len()..].to_vec();
     let address = &header.address;
-    let Some(circuit_id) = select_circuit(address, associated_socket, circuits, addr_to_cid, hops)
-    else {
+    let Some(circuit_id) = select_circuit(address, socket, circuits, addr_to_cid, hops) else {
         warn!("No {}-hop circuits available, dropping packet", hops);
         return None;
     };
@@ -102,11 +101,13 @@ async fn process_socks5_packet(
     match circuits.lock().unwrap().get_mut(&circuit_id) {
         Some(circuit) => {
             if circuit.socket.is_none() {
-                circuit.socket = Some(associated_socket.clone());
                 info!(
-                    "Associated socket ({} hops) for circuit {} ({})",
-                    hops, circuit_id, circuit.goal_hops
+                    "Connecting circuit {} to associate socket {} ({} hops)",
+                    socket.local_addr().unwrap(),
+                    circuit_id,
+                    hops
                 );
+                circuit.socket = Some(socket.clone());
             }
 
             let guard = settings.load();

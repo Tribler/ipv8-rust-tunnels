@@ -193,6 +193,17 @@ impl Endpoint {
             return Ok(());
         };
         associate.handle.abort();
+        for (_, circuit) in self.circuits.lock().unwrap().iter_mut() {
+            if !circuit.socket.is_none() && Arc::ptr_eq(circuit.socket.as_ref().unwrap(), &associate.socket) {
+                info!(
+                    "Disconnecting circuit {} from associate socket {} ({} hops)",
+                    circuit.circuit_id,
+                    associate.socket.local_addr().unwrap(),
+                    associate.hops
+                );
+                circuit.socket = None;
+            }
+        }
         info!("Closed UDP associate for port {}", port);
         Ok(())
     }
