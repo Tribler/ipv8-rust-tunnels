@@ -1,5 +1,5 @@
 use arc_swap::ArcSwap;
-use rand::prelude::IndexedRandom;
+use rand::seq::IteratorRandom;
 use socks5_proto::{Address, UdpHeader};
 use std::io::Cursor;
 use std::net::Ipv4Addr;
@@ -100,16 +100,6 @@ async fn process_socks5_packet(
 
     match circuits.lock().unwrap().get_mut(&circuit_id) {
         Some(circuit) => {
-            if circuit.socket.is_none() {
-                info!(
-                    "Connecting circuit {} to associate socket {} ({} hops)",
-                    socket.local_addr().unwrap(),
-                    circuit_id,
-                    hops
-                );
-                circuit.socket = Some(socket.clone());
-            }
-
             let guard = settings.load();
             let max_relay_early = guard.max_relay_early;
             let prefix = &guard.prefix;
@@ -162,35 +152,40 @@ fn select_circuit(
     match addr_to_cid.get(address) {
         Some(cid) => Some(*cid),
         None => {
-            let options = get_options(&socket, &circuits, hops, 2);
-            let Some(&cid) = options.choose(&mut rand::rng()) else {
+            let mut guard = circuits.lock().unwrap();
+            let mut options: Vec<&Circuit> = guard
+                .values()
+                .filter(|c| {
+                    c.goal_hops == hops
+                        && c.data_ready()
+                        && (c.socket.is_none() || Arc::ptr_eq(c.socket.as_ref().unwrap(), &socket))
+                })
+                .collect();
+            options.sort_by_key(|c| c.socket.is_none() as u8);
+
+            let Some(circuit_id) = options
+                .iter()
+                .take(2)
+                .map(|c| c.circuit_id)
+                .choose(&mut rand::rng())
+            else {
                 return None;
             };
-            addr_to_cid.insert(address.clone(), cid);
-            Some(cid)
+
+            if let Some(circuit) = guard.get_mut(&circuit_id) {
+                if circuit.socket.is_none() {
+                    info!(
+                        "Connecting circuit {} to associate socket {} ({} hops)",
+                        socket.local_addr().unwrap(),
+                        circuit.circuit_id,
+                        hops
+                    );
+                    circuit.socket = Some(socket.clone());
+                }
+                addr_to_cid.insert(address.clone(), circuit.circuit_id);
+                return Some(circuit.circuit_id)
+            }
+            None
         }
     }
-}
-
-fn get_options(
-    socket: &Arc<UdpSocket>,
-    circuits: &Arc<Mutex<HashMap<u32, Circuit>>>,
-    hops: u8,
-    limit: u8,
-) -> Vec<u32> {
-    let guard = circuits.lock().unwrap();
-    let mut circuits: Vec<&Circuit> = guard
-        .values()
-        .filter(|c| {
-            c.goal_hops == hops
-                && c.data_ready()
-                && (c.socket.is_none() || Arc::ptr_eq(c.socket.as_ref().unwrap(), &socket))
-        })
-        .collect();
-    circuits.sort_by_key(|c| c.socket.is_none() as u8);
-    circuits
-        .iter()
-        .map(|c| c.circuit_id)
-        .take(limit as usize)
-        .collect()
 }
