@@ -176,6 +176,12 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         """
         return self.rust_ep.set_udp_associate_default_remote(addr)
 
+    def get_associated_circuits(self, port: int) -> list[int]:
+        """
+        Get the circuits for the given UDP associate port.
+        """
+        return self.rust_ep.get_associated_circuits(port)
+
     def datagram_received(self, ip: str, port: int, datagram: bytes) -> None:
         """
         Process incoming data that's coming directly from the socket.

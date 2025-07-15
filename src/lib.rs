@@ -194,7 +194,9 @@ impl Endpoint {
         };
         associate.handle.abort();
         for (_, circuit) in self.circuits.lock().unwrap().iter_mut() {
-            if !circuit.socket.is_none() && Arc::ptr_eq(circuit.socket.as_ref().unwrap(), &associate.socket) {
+            if !circuit.socket.is_none()
+                && Arc::ptr_eq(circuit.socket.as_ref().unwrap(), &associate.socket)
+            {
                 info!(
                     "Disconnecting circuit {} from associate socket {} ({} hops)",
                     circuit.circuit_id,
@@ -214,6 +216,20 @@ impl Endpoint {
             associate.default_remote = Some(socket_addr.clone());
         }
         Ok(())
+    }
+
+    fn get_associated_circuits(&mut self, port: u16, py: Python<'_>) -> PyResult<PyObject> {
+        let circuit_ids: Vec<u32> = self
+            .circuits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, c)| {
+                c.socket.is_some() && c.socket.as_ref().unwrap().local_addr().unwrap().port() == port
+            })
+            .map(|(_, c)| c.circuit_id)
+            .collect();
+        Ok(PyTuple::new(py, circuit_ids)?.into_any().unbind())
     }
 
     fn run_speedtest(

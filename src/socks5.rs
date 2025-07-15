@@ -183,7 +183,7 @@ fn select_circuit(
                     circuit.socket = Some(socket.clone());
                 }
                 addr_to_cid.insert(address.clone(), circuit.circuit_id);
-                return Some(circuit.circuit_id)
+                return Some(circuit.circuit_id);
             }
             None
         }
