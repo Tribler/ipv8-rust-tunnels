@@ -66,7 +66,7 @@ impl Endpoint {
         }
     }
 
-    fn open(&mut self, callback: PyObject, worker_threads: usize) -> PyResult<()> {
+    fn open(&mut self, callback: PyObject, worker_threads: usize) -> PyResult<bool> {
         if self.socket.is_some() {
             return Err(RustError::new_err("Endpoint is already open"));
         }
@@ -108,7 +108,14 @@ impl Endpoint {
         let udp_associates = self.udp_associates.clone();
         let (socket_tx, socket_rx) = std::sync::mpsc::channel();
         settings.load().handle.spawn(async move {
-            let socket = util::create_socket_with_retry(addr.parse().unwrap()).unwrap();
+            let Ok(socket_addr) = addr.parse() else {
+                error!("Failed to parse socket address");
+                return;
+            };
+            let Ok(socket) = util::create_socket_with_retry(socket_addr) else {
+                error!("Failed to create Tokio socket");
+                return;
+            };
             socket_tx
                 .send(socket.clone())
                 .expect("Failed to send Tokio socket");
@@ -125,8 +132,12 @@ impl Endpoint {
             );
             ts.listen_forever().await;
         });
-        self.socket = Some(socket_rx.recv().expect("Failed to get Tokio socket"));
-        Ok(())
+        let Ok(socket) = socket_rx.recv() else {
+            error!("Failed to get Tokio socket");
+            return Ok(false);
+        };
+        self.socket = Some(socket);
+        Ok(true)
     }
 
     fn close(&mut self) -> PyResult<()> {
