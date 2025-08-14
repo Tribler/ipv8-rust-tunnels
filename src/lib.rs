@@ -190,7 +190,6 @@ impl Endpoint {
         let associate = UDPAssociate {
             socket,
             handle: Arc::new(handle),
-            default_remote: None,
             hops,
         };
         self.udp_associates.lock().unwrap().insert(port, associate);
@@ -221,10 +220,26 @@ impl Endpoint {
         Ok(())
     }
 
-    fn set_udp_associate_default_remote(&mut self, address: &Bound<'_, PyTuple>) -> PyResult<()> {
+    fn set_udp_associate_default_remote(
+        &mut self,
+        address: &Bound<'_, PyTuple>,
+        hops: u8,
+    ) -> PyResult<()> {
+        let Some(settings) = &self.settings else {
+            return Err(RustError::new_err("No settings available"));
+        };
+
         let socket_addr = parse_address(address)?;
         for (_, associate) in self.udp_associates.lock().unwrap().iter_mut() {
-            associate.default_remote = Some(socket_addr.clone());
+            if associate.hops == hops {
+                // Set peer_addr for the SOCKS5 socket if it hasn't been set yet.
+                if associate.socket.peer_addr().is_err() {
+                    let socket = associate.socket.clone();
+                    settings.load().handle.spawn(async move {
+                        let _ = socket.connect(socket_addr).await;
+                    });
+                }
+            }
         }
         Ok(())
     }

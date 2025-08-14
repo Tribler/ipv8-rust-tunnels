@@ -170,11 +170,11 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         """
         return self.rust_ep.close_udp_associate(port)
 
-    def set_udp_associate_default_remote(self, addr: Address) -> None:
+    def set_udp_associate_default_remote(self, addr: Address, hops: int) -> None:
         """
         Set the default remote address for all available SOCKS5 UDP associate sockets.
         """
-        return self.rust_ep.set_udp_associate_default_remote(addr)
+        return self.rust_ep.set_udp_associate_default_remote(addr, hops)
 
     def get_associated_circuits(self, port: int) -> list[int]:
         """

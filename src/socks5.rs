@@ -17,7 +17,6 @@ use crate::stats::Stats;
 pub struct UDPAssociate {
     pub socket: Arc<UdpSocket>,
     pub handle: Arc<JoinHandle<()>>,
-    pub default_remote: Option<SocketAddr>,
     pub hops: u8,
 }
 

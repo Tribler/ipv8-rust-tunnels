@@ -209,11 +209,10 @@ impl TunnelSocket {
             // send the packet to all UDP associates with the correct hop count.
             if session_hops != 0 {
                 for associate in self.udp_associates.lock().unwrap().values() {
-                    if associate.hops != session_hops || associate.default_remote.is_none() {
+                    if associate.hops != session_hops {
                         continue;
                     }
-                    let default_remote = associate.default_remote.unwrap();
-                    match associate.socket.try_send_to(&data, default_remote) {
+                    match associate.socket.try_send(&data) {
                         Ok(_) => {}
                         Err(e) => error!("Error while sending e2e packet to SOCKS5: {}", e),
                     };
