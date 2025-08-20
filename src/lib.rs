@@ -11,8 +11,6 @@ use routing::circuit::{Circuit, CircuitType};
 use routing::exit::{ExitSocket, PeerFlag};
 use routing::relay::RelayRoute;
 use socket::{TunnelSettings, TunnelSocket};
-use socks5::UDPAssociate;
-use stats::Stats;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::{
@@ -20,11 +18,18 @@ use std::{
     sync::Arc,
     thread,
 };
-use tokio::net::UdpSocket;
+use tokio::net::TcpListener;
 use tokio::sync::oneshot::Sender;
 
+use crate::packet::is_cell;
+use crate::payload::Address;
+use crate::routing::table::RoutingTable;
+use crate::socks5::Socks5Server;
+
 mod crypto;
+mod packet;
 mod payload;
+mod request_cache;
 mod routing;
 mod socket;
 mod socks5;
@@ -39,13 +44,9 @@ create_exception!(ipv8_rust_tunnels, RustError, PyException);
 #[pyclass]
 pub struct Endpoint {
     addr: String,
-    socket: Option<Arc<UdpSocket>>,
-    stats: Arc<Mutex<Stats>>,
+    rt: Option<RoutingTable>,
     settings: Option<Arc<ArcSwap<TunnelSettings>>>,
-    circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
-    relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
-    exit_sockets: Arc<Mutex<HashMap<u32, ExitSocket>>>,
-    udp_associates: Arc<Mutex<HashMap<u16, UDPAssociate>>>,
+    socks_servers: Arc<Mutex<HashMap<SocketAddr, Socks5Server>>>,
     tokio_shutdown: Option<Sender<()>>,
 }
 
@@ -55,19 +56,15 @@ impl Endpoint {
     fn new(listen_addr: String, list_port: u16) -> Self {
         Endpoint {
             addr: format!("{}:{}", listen_addr, list_port),
-            socket: None,
-            stats: Arc::new(Mutex::new(Stats::new())),
+            rt: None,
             settings: None,
-            circuits: Arc::new(Mutex::new(HashMap::new())),
-            relays: Arc::new(Mutex::new(HashMap::new())),
-            exit_sockets: Arc::new(Mutex::new(HashMap::new())),
-            udp_associates: Arc::new(Mutex::new(HashMap::new())),
+            socks_servers: Arc::new(Mutex::new(HashMap::new())),
             tokio_shutdown: None,
         }
     }
 
     fn open(&mut self, callback: PyObject, worker_threads: usize) -> PyResult<bool> {
-        if self.socket.is_some() {
+        if self.rt.is_some() {
             return Err(RustError::new_err("Endpoint is already open"));
         }
 
@@ -101,12 +98,8 @@ impl Endpoint {
 
         info!("Spawning socket task");
         let addr = self.addr.clone();
-        let stats = self.stats.clone();
-        let circuits = self.circuits.clone();
-        let relays = self.relays.clone();
-        let exit_sockets = self.exit_sockets.clone();
-        let udp_associates = self.udp_associates.clone();
-        let (socket_tx, socket_rx) = std::sync::mpsc::channel();
+        let socks_servers = self.socks_servers.clone();
+        let (rt_tx, rt_rx) = std::sync::mpsc::channel();
         settings.load().handle.spawn(async move {
             let Ok(socket_addr) = addr.parse() else {
                 error!("Failed to parse socket address");
@@ -116,27 +109,19 @@ impl Endpoint {
                 error!("Failed to create Tokio socket");
                 return;
             };
-            socket_tx
-                .send(socket.clone())
-                .expect("Failed to send Tokio socket");
             info!("Tunnel socket listening on: {:?}", socket.local_addr().unwrap());
 
-            let mut ts = TunnelSocket::new(
-                socket,
-                stats,
-                circuits,
-                relays,
-                exit_sockets,
-                udp_associates,
-                settings,
-            );
+            let rt = RoutingTable::new(socket);
+            rt_tx.send(rt.clone()).expect("Failed to send Tokio socket");
+
+            let mut ts = TunnelSocket::new(rt, socks_servers, settings);
             ts.listen_forever().await;
         });
-        let Ok(socket) = socket_rx.recv() else {
-            error!("Failed to get Tokio socket");
+        let Ok(rt) = rt_rx.recv() else {
+            error!("Failed to get routing table");
             return Ok(false);
         };
-        self.socket = Some(socket);
+        self.rt = Some(rt);
         Ok(true)
     }
 
@@ -149,75 +134,41 @@ impl Endpoint {
             }
         }
         self.tokio_shutdown = None;
-        self.socket = None;
+        self.rt = None;
         self.settings = None;
 
         Ok(())
     }
 
-    fn create_udp_associate(&mut self, port: u16, hops: u8) -> PyResult<u16> {
-        if !self.is_open() {
-            return Err(RustError::new_err("Endpoint is not open"));
-        }
+    fn create_socks5_server(&mut self, port: u16, hops: u8) -> PyResult<u16> {
+        let rt = self.get_routing_table()?;
+        let Some(settings) = self.settings.clone() else {
+            return Err(RustError::new_err("No settings available"));
+        };
 
-        let tunnel_socket = self.socket.clone().unwrap().clone();
-        let stats = self.stats.clone();
-        let circuits = self.circuits.clone();
-        let settings = self.settings.clone().unwrap().clone();
-        let (socket_tx, socket_rx) = std::sync::mpsc::channel();
+        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let socks_servers = self.socks_servers.clone();
+        let rt = rt.clone();
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
 
-        let handle = settings.load().handle.spawn(async move {
-            let addr = format!("127.0.0.1:{}", port).parse().unwrap();
-            let socket = match util::create_socket(addr) {
-                Ok(socket) => socket,
+        settings.load().handle.spawn(async move {
+            let listener = match TcpListener::bind(addr).await {
+                Ok(listener) => listener,
                 Err(e) => {
-                    error!("UDP associate socket couldn't be created: {}", e);
+                    error!("TCP listener couldn't be created: {}", e);
                     return;
                 }
             };
-            socket_tx
-                .send(socket.clone())
-                .expect("Failed to send SOCKS5 associate socket");
-            match socks5::handle_associate(socket, tunnel_socket, stats, circuits, settings, hops).await
-            {
-                Ok(()) => {}
-                Err(e) => error!("Error while handling SOCKS5 connection: {}", e),
-            };
+            let listen_addr = listener.local_addr().unwrap();
+            info!("Socks5 server (hops={}) listening on: {:?}", hops, listen_addr);
+            let mut server = Socks5Server::new(rt, settings, hops);
+            socks_servers.lock().unwrap().insert(listen_addr, server.clone());
+            addr_tx.send(listen_addr).expect("Failed to send Socks5 server");
+            let _ = server.listen_forever(listener).await;
         });
 
-        let socket = socket_rx.recv().expect("Failed to get SOCKS5 associate socket");
-        let port = socket.local_addr().unwrap().port();
-        let associate = UDPAssociate {
-            socket,
-            handle: Arc::new(handle),
-            hops,
-        };
-        self.udp_associates.lock().unwrap().insert(port, associate);
-        Ok(port)
-    }
-
-    fn close_udp_associate(&mut self, port: u16) -> PyResult<()> {
-        let binding = self.udp_associates.lock().unwrap();
-        let Some(associate) = binding.get(&port) else {
-            error!("Could not find UDP associate for port {}", port);
-            return Ok(());
-        };
-        associate.handle.abort();
-        for (_, circuit) in self.circuits.lock().unwrap().iter_mut() {
-            if !circuit.socket.is_none()
-                && Arc::ptr_eq(circuit.socket.as_ref().unwrap(), &associate.socket)
-            {
-                info!(
-                    "Disconnecting circuit {} from associate socket {} ({} hops)",
-                    circuit.circuit_id,
-                    associate.socket.local_addr().unwrap(),
-                    associate.hops
-                );
-                circuit.socket = None;
-            }
-        }
-        info!("Closed UDP associate for port {}", port);
-        Ok(())
+        let addr = addr_rx.recv().expect("Failed to get Socks5 server");
+        Ok(addr.port())
     }
 
     fn set_udp_associate_default_remote(
@@ -230,9 +181,12 @@ impl Endpoint {
         };
 
         let socket_addr = parse_address(address)?;
-        for (_, associate) in self.udp_associates.lock().unwrap().iter_mut() {
-            if associate.hops == hops {
-                // Set peer_addr for the SOCKS5 socket if it hasn't been set yet.
+        for (_, server) in self.socks_servers.lock().unwrap().iter_mut() {
+            if server.hops != hops {
+                continue;
+            }
+            for associate in server.associates.lock().unwrap().iter() {
+                // Set peer_addr for the Socks5 socket if it hasn't been set yet.
                 if associate.socket.peer_addr().is_err() {
                     let socket = associate.socket.clone();
                     settings.load().handle.spawn(async move {
@@ -245,7 +199,8 @@ impl Endpoint {
     }
 
     fn get_associated_circuits(&mut self, port: u16, py: Python<'_>) -> PyResult<PyObject> {
-        let circuit_ids: Vec<u32> = self
+        let rt = self.get_routing_table()?;
+        let circuit_ids: Vec<u32> = rt
             .circuits
             .lock()
             .unwrap()
@@ -268,19 +223,15 @@ impl Endpoint {
         callback: PyObject,
         callback_interval: u16,
     ) -> PyResult<()> {
+        let rt = self.get_routing_table()?;
         let Some(settings) = &self.settings else {
             return Err(RustError::new_err("No settings available"));
         };
 
-        let Some(socket) = self.socket.clone() else {
-            return Err(RustError::new_err("Socket is not open"));
-        };
-
         settings.load().handle.spawn(speedtest::run_test(
-            settings.clone(),
             circuit_id,
-            self.circuits.clone(),
-            socket,
+            rt.clone(),
+            settings.clone(),
             test_time,
             request_size,
             response_size,
@@ -292,8 +243,56 @@ impl Endpoint {
         Ok(())
     }
 
+    fn get_peers_for_circuit(&mut self, circuit_id: u32, py: Python<'_>) -> PyResult<PyObject> {
+        let rt = self.get_routing_table()?;
+        let mut result = Vec::new();
+
+        let guard = rt.circuits.lock().unwrap();
+        let hops = match guard.get(&circuit_id) {
+            Some(circuit) => circuit.goal_hops,
+            None => return Ok(PyList::new(py, result)?.into_any().unbind()),
+        };
+        drop(guard);
+
+        for (_, server) in self.socks_servers.lock().unwrap().iter() {
+            if server.hops != hops {
+                continue;
+            }
+
+            for associate in server.associates.lock().unwrap().iter() {
+                for (addr, cid) in associate.addr_to_cid.lock().unwrap().iter() {
+                    if *cid == circuit_id {
+                        let (host, port) = match addr {
+                            Address::V4(addr) => (addr.ip().to_string(), addr.port()),
+                            Address::V6(addr) => (addr.ip().to_string(), addr.port()),
+                            Address::DomainAddress((host, port)) => {
+                                (String::from_utf8_lossy(host).to_string(), *port)
+                            }
+                        };
+                        let any_addr = vec![host.into_py_any(py)?, port.into_py_any(py)?];
+                        result.push(PyTuple::new(py, any_addr)?.into_any().unbind());
+                    }
+                }
+            }
+        }
+        Ok(PyList::new(py, result)?.into_any().unbind())
+    }
+
+    fn get_socks5_statistics(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let mut result = Vec::new();
+        for (addr, server) in self.socks_servers.lock().unwrap().iter() {
+            let item = PyDict::new(py);
+            let _ = item.set_item("port", addr.port());
+            let _ = item.set_item("hops", server.hops);
+            let _ = item.set_item("associates", server.associates.lock().unwrap().len());
+            result.push(item);
+        }
+        Ok(PyList::new(py, result)?.into_any().unbind())
+    }
+
     fn get_socket_statistics(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        Ok(PyTuple::new(py, self.stats.lock().unwrap().socket_stats.to_vec())?
+        let rt = self.get_routing_table()?;
+        Ok(PyTuple::new(py, rt.stats.lock().unwrap().socket_stats.to_vec())?
             .into_any()
             .unbind())
     }
@@ -313,9 +312,11 @@ impl Endpoint {
             }
         };
 
-        if let Some(stats) = self.stats.lock().unwrap().msg_stats.get(&cid) {
-            for (key, value) in stats.iter() {
-                let _ = result.set_item(key, value.to_vec());
+        if let Some(rt) = &self.rt {
+            if let Some(stats) = rt.stats.lock().unwrap().msg_stats.get(&cid) {
+                for (key, value) in stats.iter() {
+                    let _ = result.set_item(key, value.to_vec());
+                }
             }
         }
         Ok(result.into_any().unbind())
@@ -373,6 +374,7 @@ impl Endpoint {
                 2 => PeerFlag::ExitBt,
                 4 => PeerFlag::ExitIpv8,
                 8 => PeerFlag::SpeedTest,
+                32768 => PeerFlag::ExitHttp,
                 f => {
                     warn!("Skipping invalid peer flag: {}", f);
                     continue;
@@ -405,36 +407,35 @@ impl Endpoint {
     }
 
     fn get_address(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        if let Some(socket) = &self.socket {
-            let addr = socket.local_addr().unwrap();
-            let ip = addr.ip().to_string().into_py_any(py)?;
-            let port = addr.port().into_py_any(py)?;
-            Ok(PyTuple::new(py, vec![ip, port])?.into_any().unbind())
-        } else {
-            Err(RustError::new_err("Socket is not open"))
-        }
+        let rt = self.get_routing_table()?;
+        let addr = rt.socket.local_addr().unwrap();
+        let ip = addr.ip().to_string().into_py_any(py)?;
+        let port = addr.port().into_py_any(py)?;
+        Ok(PyTuple::new(py, vec![ip, port])?.into_any().unbind())
     }
 
     fn get_byte_counters(&mut self) -> PyResult<PyObject> {
         let mut bytes_up = 0;
         let mut bytes_down = 0;
-        for (_, circuit) in self.circuits.lock().unwrap().iter() {
-            bytes_up += circuit.bytes_up;
-            bytes_down += circuit.bytes_down;
-        }
-        for (_, relay) in self.relays.lock().unwrap().iter() {
-            bytes_up += relay.bytes_up;
-            bytes_down += relay.bytes_down;
-        }
-        for (_, exit) in self.exit_sockets.lock().unwrap().iter() {
-            bytes_up += exit.bytes_up;
-            bytes_down += exit.bytes_down;
+        if let Some(rt) = &self.rt {
+            for (_, circuit) in rt.circuits.lock().unwrap().iter() {
+                bytes_up += circuit.bytes_up;
+                bytes_down += circuit.bytes_down;
+            }
+            for (_, relay) in rt.relays.lock().unwrap().iter() {
+                bytes_up += relay.bytes_up;
+                bytes_down += relay.bytes_down;
+            }
+            for (_, exit) in rt.exits.lock().unwrap().iter() {
+                bytes_up += exit.bytes_up;
+                bytes_down += exit.bytes_down;
+            }
         }
         Python::with_gil(|py| Ok(PyTuple::new(py, vec![bytes_up, bytes_down])?.into_any().unbind()))
     }
 
     fn is_open(&mut self) -> bool {
-        self.socket.is_some() && self.settings.is_some()
+        self.rt.is_some() && self.settings.is_some()
     }
 
     fn send(&mut self, address: &Bound<'_, PyTuple>, bytes: &Bound<'_, PyBytes>) -> PyResult<()> {
@@ -445,11 +446,12 @@ impl Endpoint {
     }
 
     fn send_cell(&mut self, address: &Bound<'_, PyTuple>, bytes: &Bound<'_, PyBytes>) -> PyResult<()> {
+        let rt = self.get_routing_table()?;
         let socket_addr = parse_address(address)?;
         let packet = bytes.as_bytes().to_vec();
         let guard = self.settings.clone().unwrap().load();
 
-        if !payload::is_cell(&guard.prefix, &packet) {
+        if !is_cell(&guard.prefix, &packet) {
             error!("Trying to send invalid cell");
             return Ok(());
         }
@@ -457,14 +459,14 @@ impl Endpoint {
         let circuit_id = u32::from_be_bytes(packet[23..27].try_into().unwrap());
         debug!("Sending cell({}) for {} to {}", packet[29], circuit_id, socket_addr);
 
-        if let Some(circuit) = self.circuits.lock().unwrap().get_mut(&circuit_id) {
+        if let Some(circuit) = rt.circuits.lock().unwrap().get_mut(&circuit_id) {
             return Ok(match circuit.encrypt_outgoing_cell(packet, guard.max_relay_early) {
                 Ok(cell) => self.send_to(cell, socket_addr)?,
                 Err(e) => error!("Error while encrypting cell for circuit {}: {}", circuit_id, e),
             });
         }
 
-        if let Some(exit) = self.exit_sockets.lock().unwrap().get_mut(&circuit_id) {
+        if let Some(exit) = rt.exits.lock().unwrap().get_mut(&circuit_id) {
             return Ok(match exit.encrypt_outgoing_cell(packet) {
                 Ok(cell) => self.send_to(cell, socket_addr)?,
                 Err(e) => error!("Error while encrypting cell for exit {}: {}", circuit_id, e),
@@ -478,12 +480,12 @@ impl Endpoint {
             return self.send_to(packet, socket_addr);
         }
 
-        let relay_circuit_id = match self.relays.lock().unwrap().get(&circuit_id) {
+        let relay_circuit_id = match rt.relays.lock().unwrap().get(&circuit_id) {
             #[rustfmt::skip]
             Some(relay) => if relay.rendezvous_relay { circuit_id } else { relay.circuit_id },
             None => return Ok(()),
         };
-        if let Some(relay) = self.relays.lock().unwrap().get_mut(&relay_circuit_id) {
+        if let Some(relay) = rt.relays.lock().unwrap().get_mut(&relay_circuit_id) {
             return Ok(match relay.encrypt_outgoing_cell(packet) {
                 Ok(cell) => self.send_to(cell, socket_addr)?,
                 Err(e) => error!("Error while encrypting cell for relay {}: {}", circuit_id, e),
@@ -494,14 +496,16 @@ impl Endpoint {
     }
 
     fn add_circuit(&mut self, circuit_id: u32, py_circuit: PyObject) -> PyResult<()> {
+        let rt = self.get_routing_table()?;
         let mut circuit = Circuit::new(circuit_id);
         set_circuit_keys(&mut circuit, &py_circuit)?;
-        self.circuits.lock().unwrap().insert(circuit.circuit_id, circuit);
+        rt.circuits.lock().unwrap().insert(circuit.circuit_id, circuit);
         Ok(())
     }
 
     fn update_circuit(&mut self, circuit_id: u32, py_circuit: PyObject) -> PyResult<()> {
-        if let Some(circuit) = self.circuits.lock().unwrap().get_mut(&circuit_id) {
+        let rt = self.get_routing_table()?;
+        if let Some(circuit) = rt.circuits.lock().unwrap().get_mut(&circuit_id) {
             set_circuit_keys(circuit, &py_circuit)?;
             set_stats(circuit.bytes_up, circuit.bytes_down, circuit.last_activity, &py_circuit)?;
         }
@@ -509,17 +513,21 @@ impl Endpoint {
     }
 
     fn update_circuit_stats(&mut self, circuit_id: u32, py_circuit: PyObject) -> PyResult<()> {
-        if let Some(circuit) = self.circuits.lock().unwrap().get_mut(&circuit_id) {
+        let rt = self.get_routing_table()?;
+        if let Some(circuit) = rt.circuits.lock().unwrap().get_mut(&circuit_id) {
             set_stats(circuit.bytes_up, circuit.bytes_down, circuit.last_activity, &py_circuit)?;
         }
         Ok(())
     }
 
-    fn remove_circuit(&mut self, circuit_id: u32) {
-        self.circuits.lock().unwrap().remove(&circuit_id);
+    fn remove_circuit(&mut self, circuit_id: u32) -> PyResult<()> {
+        let rt = self.get_routing_table()?;
+        rt.circuits.lock().unwrap().remove(&circuit_id);
+        Ok(())
     }
 
     fn add_relay(&mut self, circuit_id: u32, py_relay: PyObject) -> PyResult<()> {
+        let rt = self.get_routing_table()?;
         Python::with_gil(|py| {
             let mut relay = RelayRoute::new(py_relay.getattr(py, "circuit_id")?.extract::<u32>(py)?);
             relay.direction = match py_relay.getattr(py, "direction")?.extract(py)? {
@@ -531,23 +539,27 @@ impl Endpoint {
             relay.peer = addr_from_hop(&hop)?;
             relay.keys.push(keys_from_hop(&hop)?);
             relay.rendezvous_relay = py_relay.getattr(py, "rendezvous_relay")?.extract::<bool>(py)?;
-            self.relays.lock().unwrap().insert(circuit_id, relay);
+            rt.relays.lock().unwrap().insert(circuit_id, relay);
             Ok(())
         })
     }
 
     fn update_relay_stats(&mut self, circuit_id: u32, py_relay: PyObject) -> PyResult<()> {
-        if let Some(relay) = self.relays.lock().unwrap().get_mut(&circuit_id) {
+        let rt = self.get_routing_table()?;
+        if let Some(relay) = rt.relays.lock().unwrap().get_mut(&circuit_id) {
             set_stats(relay.bytes_up, relay.bytes_down, relay.last_activity, &py_relay)?;
         }
         Ok(())
     }
 
-    fn remove_relay(&mut self, circuit_id: u32) {
-        self.relays.lock().unwrap().remove(&circuit_id);
+    fn remove_relay(&mut self, circuit_id: u32) -> PyResult<()> {
+        let rt = self.get_routing_table()?;
+        rt.relays.lock().unwrap().remove(&circuit_id);
+        Ok(())
     }
 
     fn add_exit(&mut self, circuit_id: u32, py_exit: PyObject) -> PyResult<()> {
+        let rt = self.get_routing_table()?;
         let mut exit = ExitSocket::new(circuit_id);
 
         Python::with_gil(|py| {
@@ -555,13 +567,14 @@ impl Endpoint {
             let hop = binding.bind(py);
             exit.peer = addr_from_hop(&hop)?;
             exit.keys.push(keys_from_hop(&hop)?);
-            self.exit_sockets.lock().unwrap().insert(exit.circuit_id, exit);
+            rt.exits.lock().unwrap().insert(exit.circuit_id, exit);
             Ok(())
         })
     }
 
     fn update_exit_stats(&mut self, circuit_id: u32, py_exit: PyObject) -> PyResult<()> {
-        if let Some(exit) = self.exit_sockets.lock().unwrap().get_mut(&circuit_id) {
+        let rt = self.get_routing_table()?;
+        if let Some(exit) = rt.exits.lock().unwrap().get_mut(&circuit_id) {
             set_stats(exit.bytes_up, exit.bytes_down, exit.last_activity, &py_exit)?;
             return Python::with_gil(|py| {
                 py_exit.setattr(py, "enabled", exit.socket.is_some())?;
@@ -571,8 +584,9 @@ impl Endpoint {
         Ok(())
     }
 
-    fn remove_exit(&mut self, circuit_id: u32) {
-        let mut exit_lock = self.exit_sockets.lock().unwrap();
+    fn remove_exit(&mut self, circuit_id: u32) -> PyResult<()> {
+        let rt = self.get_routing_table()?;
+        let mut exit_lock = rt.exits.lock().unwrap();
         if let Some(exit) = exit_lock.get(&circuit_id) {
             if let Some(handle) = &exit.handle {
                 handle.abort();
@@ -580,27 +594,24 @@ impl Endpoint {
             }
         }
         exit_lock.remove(&circuit_id);
+        Ok(())
     }
 }
 
 impl Endpoint {
     fn send_to(&self, packet: Vec<u8>, address: SocketAddr) -> PyResult<()> {
-        let Some(socket) = &self.socket else {
-            return Err(RustError::new_err("Socket is not open"));
-        };
+        let rt = self.get_routing_table()?;
 
-        match socket.try_send_to(&packet, address) {
-            Ok(_) => self.stats.lock().unwrap().add_up(&packet, packet.len()),
+        match rt.socket.try_send_to(&packet, address) {
+            Ok(_) => rt.stats.lock().unwrap().add_up(&packet, packet.len()),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // The socket is busy, so we'll retry on the Tokio thread and await it.
                 let Some(settings) = &self.settings else {
                     return Err(RustError::new_err("No settings available"));
                 };
-                let Some(cloned_socket) = self.socket.clone() else {
-                    return Err(RustError::new_err("Socket is not open"));
-                };
-                let cloned_stats = self.stats.clone();
 
+                let cloned_socket = rt.socket.clone();
+                let cloned_stats = rt.stats.clone();
                 settings.load().handle.spawn(async move {
                     match cloned_socket.send_to(&packet, address).await {
                         Ok(_) => cloned_stats.lock().unwrap().add_up(&packet, packet.len()),
@@ -611,6 +622,13 @@ impl Endpoint {
             Err(e) => error!("Could not send packet to {}: {}", address, e.to_string()),
         };
         Ok(())
+    }
+
+    fn get_routing_table(&self) -> Result<&RoutingTable, PyErr> {
+        match &self.rt {
+            Some(rt) => Ok(rt),
+            None => Err(RustError::new_err("Endpoint is not open")),
+        }
     }
 }
 
@@ -626,6 +644,7 @@ pub fn ipv8_rust_tunnels(py: Python, module: &Bound<'_, PyModule>) -> PyResult<(
 
 fn set_circuit_keys(circuit: &mut Circuit, py_circuit: &PyObject) -> PyResult<()> {
     circuit.keys.clear();
+    circuit.exit_flags.clear();
 
     Python::with_gil(|py| {
         let hops = py_circuit.getattr(py, "_hops")?;
@@ -649,6 +668,22 @@ fn set_circuit_keys(circuit: &mut Circuit, py_circuit: &PyObject) -> PyResult<()
             "RP_DOWNLOADER" => CircuitType::RPDownloader,
             _ => CircuitType::Data,
         };
+        for py_peer_flag in py_circuit
+            .getattr(py, "exit_flags")?
+            .downcast_bound::<PyList>(py)?
+        {
+            circuit.exit_flags.insert(match py_peer_flag.extract::<u16>()? {
+                1 => PeerFlag::Relay,
+                2 => PeerFlag::ExitBt,
+                4 => PeerFlag::ExitIpv8,
+                8 => PeerFlag::SpeedTest,
+                32768 => PeerFlag::ExitHttp,
+                f => {
+                    warn!("Skipping invalid exit flag: {}", f);
+                    continue;
+                }
+            });
+        }
         Ok(())
     })
 }

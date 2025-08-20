@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 pub struct Stat {
     pub num_up: usize,
     pub num_down: usize,
@@ -28,6 +28,7 @@ impl Stat {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Stats {
     pub socket_stats: Stat,
     pub msg_stats: HashMap<[u8; 22], HashMap<u8, Stat>>,

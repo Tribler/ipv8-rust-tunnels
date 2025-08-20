@@ -1,23 +1,28 @@
 use arc_swap::{ArcSwap, ArcSwapAny};
+use deku::DekuReader;
 use map_macro::hash_set;
 use pyo3::types::PyBytes;
 use pyo3::{PyObject, Python};
 use rand::RngCore;
-use socks5_proto::Address;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::{net::SocketAddr, sync::Arc};
-use tokio::io::ErrorKind;
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ErrorKind};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::runtime::Handle;
 
 use crate::crypto::Direction;
-use crate::payload;
-use crate::routing::circuit::{Circuit, CircuitType};
+use crate::packet::{
+    decrypt_cell, encrypt_cell, has_prefix, has_prefixes, is_cell, swap_circuit_id, unwrap_cell,
+    wrap_cell,
+};
+use crate::payload::{
+    self, Address, HTTPResponsePayload, Header, Raw, TestRequestPayload, TestResponsePayload, VarLenH,
+};
+use crate::routing::circuit::CircuitType;
 use crate::routing::exit::{ExitSocket, PeerFlag};
-use crate::routing::relay::RelayRoute;
-use crate::socks5::UDPAssociate;
-use crate::stats::Stats;
+use crate::routing::table::RoutingTable;
+use crate::socks5::Socks5Server;
 use crate::util::Result;
 
 #[derive(Debug)]
@@ -30,6 +35,7 @@ pub struct TunnelSettings {
     pub callback: PyObject,
     pub test_channel: tokio::sync::broadcast::Sender<(u32, usize)>,
     pub handle: Handle,
+    pub default_remotes: HashMap<u8, SocketAddr>,
 }
 
 impl TunnelSettings {
@@ -43,6 +49,7 @@ impl TunnelSettings {
             callback,
             test_channel: tokio::sync::broadcast::Sender::<(u32, usize)>::new(200),
             handle,
+            default_remotes: HashMap::new(),
         }
     }
 
@@ -56,55 +63,44 @@ impl TunnelSettings {
             callback: settings.callback.clone_ref(py),
             test_channel: settings.test_channel.clone(),
             handle: settings.handle.clone(),
+            default_remotes: settings.default_remotes.clone(),
         }
     }
 }
 
 pub struct TunnelSocket {
-    socket: Arc<UdpSocket>,
-    stats: Arc<Mutex<Stats>>,
-    circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
-    relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
-    exit_sockets: Arc<Mutex<HashMap<u32, ExitSocket>>>,
-    udp_associates: Arc<Mutex<HashMap<u16, UDPAssociate>>>,
+    rt: RoutingTable,
+    socks_servers: Arc<Mutex<HashMap<SocketAddr, Socks5Server>>>,
     settings: Arc<ArcSwap<TunnelSettings>>,
 }
 
 impl TunnelSocket {
     pub fn new(
-        socket: Arc<UdpSocket>,
-        stats: Arc<Mutex<Stats>>,
-        circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
-        relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
-        exit_sockets: Arc<Mutex<HashMap<u32, ExitSocket>>>,
-        udp_associates: Arc<Mutex<HashMap<u16, UDPAssociate>>>,
+        rt: RoutingTable,
+        socks_servers: Arc<Mutex<HashMap<SocketAddr, Socks5Server>>>,
         settings: Arc<ArcSwap<TunnelSettings>>,
     ) -> Self {
         TunnelSocket {
-            socket,
-            stats,
-            circuits,
-            relays,
-            exit_sockets,
-            udp_associates,
+            rt,
+            socks_servers,
             settings,
         }
     }
 
     pub async fn listen_forever(&mut self) {
         let mut buf = [0; 2048];
-        let listen_addr = self.socket.local_addr().unwrap();
+        let listen_addr = self.rt.socket.local_addr().unwrap();
 
         loop {
-            match self.socket.recv_from(&mut buf).await {
+            match self.rt.socket.recv_from(&mut buf).await {
                 Ok((n, addr)) => {
                     let packet = &buf[..n];
-                    self.stats.lock().unwrap().add_down(packet, n);
+                    self.rt.stats.lock().unwrap().add_down(packet, n);
 
                     let guard = ArcSwapAny::load(&self.settings);
 
-                    if !payload::is_cell(&guard.prefix, &packet) {
-                        if payload::has_prefixes(&guard.prefixes, packet) {
+                    if !is_cell(&guard.prefix, &packet) {
+                        if has_prefixes(&guard.prefixes, packet) {
                             trace!("Handover packet with {} bytes from {} to Python", n, addr);
                             self.call_python(&guard.callback, &addr, packet);
                         } else {
@@ -167,14 +163,14 @@ impl TunnelSocket {
     }
 
     async fn handle_cell_for_circuit(
-        &self,
+        &mut self,
         packet: &[u8],
         addr: SocketAddr,
         circuit_id: u32,
     ) -> Result<usize> {
         let guard = ArcSwap::load(&self.settings);
         let (data, cell_id, session_hops, to_python) =
-            match self.circuits.lock().unwrap().get_mut(&circuit_id) {
+            match self.rt.circuits.lock().unwrap().get_mut(&circuit_id) {
                 Some(circuit) => {
                     let mut data = circuit.decrypt_incoming_cell(packet, guard.max_relay_early)?;
                     let session_hops = match circuit.circuit_type {
@@ -183,7 +179,7 @@ impl TunnelSocket {
                         _ => 0,
                     };
                     let cell_id = data[29];
-                    let to_python = (data.len() > 52 && payload::has_prefix(&guard.prefix, &data[30..]))
+                    let to_python = (data.len() > 52 && has_prefix(&guard.prefix, &data[30..]))
                         || (circuit.socket.is_none() && session_hops == 0);
                     if !to_python && cell_id == 1 {
                         data = circuit.process_incoming_cell(data)?
@@ -193,14 +189,8 @@ impl TunnelSocket {
                 None => return Ok(0),
             };
 
-        if cell_id == 21 {
-            return self.on_test_request(addr, circuit_id, &data).await;
-        } else if cell_id == 22 {
-            return self.on_test_response(addr, circuit_id, &data).await;
-        } else if to_python || cell_id != 1 {
-            trace!("Handover cell({}) for circuit {} to Python", cell_id, circuit_id);
-            self.call_python(&guard.callback, &addr, &data);
-            return Ok(data.len());
+        if to_python || cell_id != 1 {
+            return self.on_incoming_packet(addr, circuit_id, &data).await;
         }
 
         let Some(socket) = self.get_socket_for_circuit(circuit_id) else {
@@ -208,14 +198,25 @@ impl TunnelSocket {
             // the circuit with a socket yet (meaning that we haven't sent any traffic). If this is the case,
             // send the packet to all UDP associates with the correct hop count.
             if session_hops != 0 {
-                for associate in self.udp_associates.lock().unwrap().values() {
-                    if associate.hops != session_hops {
+                for server in self.socks_servers.lock().unwrap().values() {
+                    if server.hops != session_hops {
                         continue;
                     }
-                    match associate.socket.try_send(&data) {
-                        Ok(_) => {}
-                        Err(e) => error!("Error while sending e2e packet to SOCKS5: {}", e),
-                    };
+
+                    for associate in server.associates.lock().unwrap().iter() {
+                        if associate.socket.peer_addr().is_err() {
+                            continue;
+                        }
+
+                        match associate.socket.try_send(&data) {
+                            Ok(_) => trace!(
+                                "Forwarding packet for circuit {} to associate socket {}",
+                                circuit_id,
+                                associate.socket.peer_addr().unwrap()
+                            ),
+                            Err(e) => error!("Error while sending e2e packet to SOCKS5: {}", e),
+                        };
+                    }
                 }
                 return Ok(data.len());
             }
@@ -229,7 +230,7 @@ impl TunnelSocket {
     }
 
     async fn handle_cell_for_relay(&self, packet: &[u8], circuit_id: u32) -> Result<usize> {
-        let result = match self.relays.lock().unwrap().get_mut(&circuit_id) {
+        let result = match self.rt.relays.lock().unwrap().get_mut(&circuit_id) {
             Some(relay) => {
                 let target = relay.peer.clone();
                 let cell = if relay.rendezvous_relay {
@@ -248,9 +249,9 @@ impl TunnelSocket {
             if hs {
                 data = self.convert_hidden_services(packet, circuit_id)?;
             }
-            return match self.socket.send_to(&data, target).await {
+            return match self.rt.socket.send_to(&data, target).await {
                 Ok(bytes) => {
-                    self.stats.lock().unwrap().add_up(&data, data.len());
+                    self.rt.stats.lock().unwrap().add_up(&data, data.len());
                     Ok(bytes)
                 }
                 Err(e) => Err(format!("Failed to send data: {}", e)),
@@ -260,34 +261,33 @@ impl TunnelSocket {
     }
 
     async fn handle_cell_for_exit(
-        &self,
+        &mut self,
         packet: &[u8],
         addr: SocketAddr,
         circuit_id: u32,
     ) -> Result<usize> {
         let guard = ArcSwap::load(&self.settings);
-        let (data, cell_id, target, to_python) =
-            match self.exit_sockets.lock().unwrap().get_mut(&circuit_id) {
-                Some(exit) => {
-                    let mut data = exit.decrypt_incoming_cell(packet, guard.max_relay_early)?;
-                    let mut target = Address::SocketAddress(addr);
-                    let cell_id = data[29];
-                    let to_python = data.len() > 52 && payload::has_prefix(&guard.prefix, &data[30..]);
-                    if !to_python && cell_id == 1 {
-                        (target, data) = exit.process_incoming_cell(data)?;
-                    }
-                    (data, cell_id, target, to_python)
+        let (data, cell_id, target, to_python) = match self.rt.exits.lock().unwrap().get_mut(&circuit_id)
+        {
+            Some(exit) => {
+                let mut data = exit.decrypt_incoming_cell(packet, guard.max_relay_early)?;
+                let mut target = match addr {
+                    SocketAddr::V4(addr) => Address::V4(addr),
+                    SocketAddr::V6(addr) => Address::V6(addr),
+                };
+                let cell_id = data[29];
+                let to_python = data.len() > 52 && has_prefix(&guard.prefix, &data[30..]);
+                if !to_python && cell_id == 1 {
+                    (target, data) = exit.process_incoming_cell(data)?;
                 }
-                None => return Ok(0),
-            };
+                (data, cell_id, target, to_python)
+            }
+            None => return Ok(0),
+        };
 
         ExitSocket::check_if_allowed(&data, &guard.prefix, &guard.peer_flags)?;
-        if cell_id == 21 {
-            return self.on_test_request(addr, circuit_id, &data).await;
-        } else if to_python || cell_id != 1 {
-            trace!("Handover cell({}) for exit {} to Python", data[29], circuit_id);
-            self.call_python(&guard.callback, &addr, &data);
-            return Ok(data.len());
+        if to_python || cell_id != 1 {
+            return self.on_incoming_packet(addr, circuit_id, &data).await;
         }
 
         if let Some(socket) = self.get_socket_for_exit(circuit_id) {
@@ -296,7 +296,7 @@ impl TunnelSocket {
             // Use is_global, once it is available.
             if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
                 // For testing purposes, allow all IPs when bound to localhost.
-                let local_addr = self.socket.local_addr().unwrap();
+                let local_addr = self.rt.socket.local_addr().unwrap();
                 if !local_addr.ip().is_loopback() {
                     return Err(format!("Address {} is not allowed. Dropping packet.", ip));
                 }
@@ -310,31 +310,29 @@ impl TunnelSocket {
     }
 
     fn convert_hidden_services(&self, cell: &[u8], circuit_id: u32) -> Result<Vec<u8>> {
-        let (decrypted, next_circuit_id) = match self.relays.lock().unwrap().get_mut(&circuit_id) {
-            Some(relay) => {
-                (payload::decrypt_cell(cell, Direction::Forward, &relay.keys)?, relay.circuit_id)
-            }
+        let (decrypted, next_circuit_id) = match self.rt.relays.lock().unwrap().get_mut(&circuit_id) {
+            Some(relay) => (decrypt_cell(cell, Direction::Forward, &relay.keys)?, relay.circuit_id),
             None => return Err("Can't find first rendezvous relay".to_owned()),
         };
 
-        let encrypted = match self.relays.lock().unwrap().get_mut(&next_circuit_id) {
-            Some(other) => payload::encrypt_cell(&decrypted, Direction::Backward, &mut other.keys)?,
+        let encrypted = match self.rt.relays.lock().unwrap().get_mut(&next_circuit_id) {
+            Some(other) => encrypt_cell(&decrypted, Direction::Backward, &mut other.keys)?,
             None => return Err("Can't find rendezvous second relay".to_owned()),
         };
 
         info!("Forwarding packet for rendezvous {} -> {}", circuit_id, next_circuit_id);
-        Ok(payload::swap_circuit_id(&encrypted, next_circuit_id))
+        Ok(swap_circuit_id(&encrypted, next_circuit_id))
     }
 
     fn get_socket_for_circuit(&self, circuit_id: u32) -> Option<Arc<UdpSocket>> {
-        match self.circuits.lock().unwrap().get_mut(&circuit_id) {
+        match self.rt.circuits.lock().unwrap().get_mut(&circuit_id) {
             Some(circuit) => circuit.socket.clone(),
             None => None,
         }
     }
 
     fn get_socket_for_exit(&self, circuit_id: u32) -> Option<Arc<UdpSocket>> {
-        match self.exit_sockets.lock().unwrap().get_mut(&circuit_id) {
+        match self.rt.exits.lock().unwrap().get_mut(&circuit_id) {
             Some(exit) => {
                 if exit.socket.is_some() {
                     return exit.socket.clone();
@@ -343,12 +341,10 @@ impl TunnelSocket {
                 let guard = self.settings.load();
                 exit.open_socket(guard.exit_addr.clone());
                 let circuit_id = exit.circuit_id.clone();
-                let socket = self.socket.clone();
-                let stats = self.stats.clone();
-                let exits = self.exit_sockets.clone();
+                let rt = self.rt.clone();
                 let settings = self.settings.clone();
                 let task = guard.handle.spawn(async move {
-                    match ExitSocket::listen_forever(socket, stats, exits, circuit_id, settings).await {
+                    match ExitSocket::listen_forever(circuit_id, rt, settings).await {
                         Ok(_) => {}
                         Err(e) => error!("Error for exit {}: {}", circuit_id, e),
                     };
@@ -363,8 +359,8 @@ impl TunnelSocket {
 
     async fn resolve(&self, address: Address, circuit_id: u32) -> Result<SocketAddr> {
         match address {
-            Address::DomainAddress(hostname, port) => {
-                let addr_string = format!("{}:{}", String::from_utf8_lossy(&*hostname), port);
+            Address::DomainAddress((host, port)) => {
+                let addr_string = format!("{}:{}", String::from_utf8_lossy(&*host), port);
                 let Ok(addr_iter) = tokio::net::lookup_host(&addr_string).await else {
                     return Err(format!("Error while resolving address {}", addr_string));
                 };
@@ -375,7 +371,8 @@ impl TunnelSocket {
                 info!("Resolved {} to {} for exit {}", addr_string, addr, circuit_id);
                 Ok(addr)
             }
-            Address::SocketAddress(addr) => Ok(addr),
+            Address::V4(addr) => Ok(SocketAddr::V4(addr)),
+            Address::V6(addr) => Ok(SocketAddr::V6(addr)),
         }
     }
 
@@ -389,54 +386,60 @@ impl TunnelSocket {
         });
     }
 
-    async fn on_test_request(&self, address: SocketAddr, circuit_id: u32, cell: &[u8]) -> Result<usize> {
-        if cell.len() < 37 {
-            return Err(format!("Got bad test-request from circuit {}", circuit_id));
+    async fn on_incoming_packet(
+        &mut self,
+        address: SocketAddr,
+        circuit_id: u32,
+        cell: &[u8],
+    ) -> Result<usize> {
+        let cell_id = cell[29];
+        match cell_id {
+            21 => self.on_test_request(address, circuit_id, &cell).await,
+            22 => self.on_test_response(address, circuit_id, &cell).await,
+            28 => self.on_http_request(address, circuit_id, &cell).await,
+            29 => self.on_http_response(address, circuit_id, &cell).await,
+            _ => {
+                trace!("Handover cell({}) for circuit {} to Python", cell_id, circuit_id);
+                let guard = ArcSwap::load(&self.settings);
+                self.call_python(&guard.callback, &address, &cell);
+                Ok(cell.len())
+            }
         }
+    }
+
+    async fn on_test_request(&self, address: SocketAddr, circuit_id: u32, cell: &[u8]) -> Result<usize> {
         debug!("Got test-request from circuit {}", circuit_id);
-        let identifier = u32::from_be_bytes(cell[30..34].try_into().unwrap());
-        let response_size = u16::from_be_bytes(cell[34..36].try_into().unwrap());
-        let mut random_data = [0; 2048];
-        rand::rng().fill_bytes(&mut random_data);
-
-        let response = [
-            cell[..22].to_vec(),
-            vec![0],
-            circuit_id.to_be_bytes().to_vec(),
-            vec![0, 0, 22],
-            identifier.to_be_bytes().to_vec(),
-            random_data[..response_size as usize].to_vec(),
-        ]
-        .concat();
-
-        let encrypted_cell = match self.exit_sockets.lock().unwrap().get_mut(&circuit_id) {
-            Some(exit) => match exit.encrypt_outgoing_cell(response) {
-                Ok(cell) => cell,
-                Err(_) => return Err(format!("Failed to encrypt test-response for {:?}", circuit_id)),
-            },
-            None => match self.circuits.lock().unwrap().get_mut(&circuit_id) {
-                Some(circuit) => {
-                    match circuit.encrypt_outgoing_cell(response, self.settings.load().max_relay_early) {
-                        Ok(cell) => cell,
-                        Err(_) => {
-                            return Err(format!("Failed to encrypt test-response for {:?}", circuit_id))
-                        }
-                    }
-                }
-                None => return Err(format!("Unexpected test-response for {:?}", circuit_id)),
-            },
+        let mut cursor = std::io::Cursor::new(unwrap_cell(&cell.to_vec()));
+        let mut reader = deku::reader::Reader::new(&mut cursor);
+        let request = match TestRequestPayload::from_reader_with_ctx(&mut reader, ()) {
+            Ok(p) => p,
+            Err(e) => return Err(format!("Error while decoding test request: {}", e)),
         };
 
-        return match self.socket.send_to(&encrypted_cell, address).await {
+        let mut random_data = vec![0; request.response_size.try_into().unwrap()];
+        rand::rng().fill_bytes(&mut random_data);
+        match self
+            .send_cell(
+                circuit_id,
+                &address,
+                &TestResponsePayload {
+                    header: Header {
+                        prefix: request.header.prefix,
+                        msg_id: 22,
+                        circuit_id,
+                    },
+                    identifier: request.identifier,
+                    response: Raw { data: random_data },
+                },
+            )
+            .await
+        {
             Ok(bytes) => {
-                self.stats
-                    .lock()
-                    .unwrap()
-                    .add_up(&encrypted_cell, encrypted_cell.len());
+                debug!("Sending test-response over circuit {}", circuit_id);
                 Ok(bytes)
             }
-            Err(e) => Err(format!("Failed to send test-response: {}", e)),
-        };
+            Err(e) => return Err(format!("error sending test-response: {}", e)),
+        }
     }
 
     async fn on_test_response(
@@ -445,12 +448,142 @@ impl TunnelSocket {
         circuit_id: u32,
         cell: &[u8],
     ) -> Result<usize> {
-        if cell.len() < 35 {
-            return Err(format!("Got bad test-response from circuit {}", circuit_id));
-        }
         debug!("Got test-response from circuit {}", circuit_id);
-        let tid = u32::from_be_bytes(cell[30..34].try_into().unwrap());
-        let _ = self.settings.load().test_channel.send((tid, cell.len()));
+        let mut cursor = std::io::Cursor::new(unwrap_cell(&cell.to_vec()));
+        let mut reader = deku::reader::Reader::new(&mut cursor);
+        let payload = match TestResponsePayload::from_reader_with_ctx(&mut reader, ()) {
+            Ok(p) => p,
+            Err(e) => return Err(format!("error while decoding test response: {}", e)),
+        };
+        let _ = self
+            .settings
+            .load()
+            .test_channel
+            .send((payload.identifier, cell.len()));
         Ok(cell.len())
+    }
+
+    async fn on_http_request(&self, address: SocketAddr, circuit_id: u32, cell: &[u8]) -> Result<usize> {
+        debug!("Got http-request from circuit {}", circuit_id);
+        if !self.settings.load().peer_flags.contains(&PeerFlag::ExitHttp) {
+            return Err(format!("dropping http-request, exiting HTTP is disabled"));
+        }
+        let mut cursor = std::io::Cursor::new(unwrap_cell(&cell.to_vec()));
+        let mut reader = deku::reader::Reader::new(&mut cursor);
+        let request = match payload::HTTPRequestPayload::from_reader_with_ctx(&mut reader, ()) {
+            Ok(p) => p,
+            Err(e) => return Err(format!("error while decoding http request: {}", e)),
+        };
+
+        let stream_result = match request.target {
+            Address::V4(addr) => TcpStream::connect(addr).await,
+            Address::V6(addr) => TcpStream::connect(addr).await,
+            Address::DomainAddress((domain, port)) => {
+                TcpStream::connect((String::from_utf8_lossy(&domain).to_string(), port)).await
+            }
+        };
+        let Ok(mut stream) = stream_result else {
+            return Err(format!("error creating TCP stream"));
+        };
+
+        match stream.write_all(&request.request.data).await {
+            Err(e) => return Err(format!("error writing to TCP stream: {}", e)),
+            _ => {}
+        }
+
+        let mut reader = tokio::io::BufReader::new(stream);
+        let mut buf = [0; 1024 * 1024];
+        let tcp_response = match reader.read(&mut buf).await {
+            Ok(size) => &buf[..size],
+            Err(e) => return Err(format!("error reading from TCP stream: {}", e)),
+        };
+
+        if !tcp_response.starts_with("HTTP/1.1 307".as_bytes()) {
+            for i in 0..tcp_response.len() {
+                if tcp_response[i..].starts_with(b"\r\n\r\n") {
+                    if bdecode::bdecode(&tcp_response[i + 4..]).is_err() {
+                        return Err(format!(
+                            "TCP response is not bencoded ({})",
+                            String::from_utf8_lossy(&tcp_response[i + 4..])
+                        ));
+                    };
+                    break;
+                }
+            }
+        }
+
+        let num_cells = u16::div_ceil(tcp_response.len() as u16, 1400);
+        for (index, chunk) in tcp_response.to_vec().chunks(1400).enumerate() {
+            match self
+                .send_cell(
+                    circuit_id,
+                    &address,
+                    &HTTPResponsePayload {
+                        header: Header {
+                            prefix: cell[..22].to_vec(),
+                            msg_id: 29,
+                            circuit_id,
+                        },
+                        identifier: request.identifier,
+                        part: index as u16,
+                        total: num_cells,
+                        response: VarLenH {
+                            data_len: chunk.len() as u16,
+                            data: chunk.to_vec(),
+                        },
+                    },
+                )
+                .await
+            {
+                Ok(_) => debug!("Sending http-response ({}) over circuit {}", index + 1, circuit_id),
+                Err(e) => return Err(format!("error sending http-response: {}", e)),
+            };
+        }
+        Ok(tcp_response.len())
+    }
+
+    async fn on_http_response(
+        &mut self,
+        _address: SocketAddr,
+        circuit_id: u32,
+        cell: &[u8],
+    ) -> Result<usize> {
+        debug!("Got http-response from circuit {}", circuit_id);
+        let identifier = u32::from_be_bytes(cell[30..34].try_into().unwrap());
+        match self.rt.request_cache.get("HTTPRequest".to_owned(), identifier) {
+            Some(cache) => {
+                if let Err(_) = cache.send(unwrap_cell(&cell.to_vec())).await {
+                    return Err(format!("error handling http-response"));
+                }
+            }
+            None => return Err(format!("unexpected http-response")),
+        }
+        Ok(cell.len())
+    }
+
+    async fn send_cell(
+        &self,
+        circuit_id: u32,
+        target: &impl tokio::net::ToSocketAddrs,
+        payload: &impl deku::DekuContainerWrite,
+    ) -> Result<usize> {
+        let payload_data = payload.to_bytes().unwrap();
+        let cell = wrap_cell(&payload_data);
+        let encrypted_cell = match self.rt.exits.lock().unwrap().get_mut(&circuit_id) {
+            Some(exit) => exit.encrypt_outgoing_cell(cell)?,
+            None => return Err(format!("unknown circuit")),
+        };
+
+        match self.rt.socket.send_to(&encrypted_cell, target).await {
+            Ok(bytes) => {
+                self.rt
+                    .stats
+                    .lock()
+                    .unwrap()
+                    .add_up(&encrypted_cell, encrypted_cell.len());
+                Ok(bytes)
+            }
+            Err(e) => Err(format!("{}", e)),
+        }
     }
 }

@@ -7,15 +7,20 @@ use std::{
 use arc_swap::ArcSwap;
 use pyo3::{types::IntoPyDict, PyObject, Python};
 use rand::{Rng, RngCore};
-use tokio::{net::UdpSocket, sync::broadcast};
+use tokio::sync::broadcast;
 
-use crate::{routing::circuit::Circuit, socket::TunnelSettings, util::get_time_ms};
+use crate::{
+    packet::wrap_cell,
+    payload::{Header, Raw, TestRequestPayload},
+    routing::table::RoutingTable,
+    socket::TunnelSettings,
+    util::get_time_ms,
+};
 
 pub async fn run_test(
-    settings: Arc<ArcSwap<TunnelSettings>>,
     circuit_id: u32,
-    circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
-    socket: Arc<UdpSocket>,
+    rt: RoutingTable,
+    settings: Arc<ArcSwap<TunnelSettings>>,
     test_time: u16,
     request_size: u16,
     response_size: u16,
@@ -45,9 +50,8 @@ pub async fn run_test(
     let prefix = settings.load().prefix.clone();
     let send_task = settings.load().handle.spawn(send_loop(
         circuit_id,
-        circuits.clone(),
         prefix,
-        socket.clone(),
+        rt.clone(),
         request_size,
         response_size,
         target_rtt,
@@ -100,9 +104,8 @@ pub async fn receive_loop(
 
 pub async fn send_loop(
     circuit_id: u32,
-    circuits: Arc<Mutex<HashMap<u32, Circuit>>>,
     prefix: Vec<u8>,
-    socket: Arc<UdpSocket>,
+    rt: RoutingTable,
     request_size: u16,
     response_size: u16,
     target_rtt: u16,
@@ -122,21 +125,25 @@ pub async fn send_loop(
         }
 
         let tid: u32 = rand::rng().random();
+        let test_request: Vec<u8> = TestRequestPayload {
+            header: Header {
+                prefix: prefix.to_vec(),
+                msg_id: 21,
+                circuit_id,
+            },
+            identifier: tid,
+            response_size,
+            request: Raw {
+                data: random_data[..request_size as usize].to_vec(),
+            },
+        }
+        .try_into()
+        .unwrap();
 
-        let test_request = [
-            prefix.to_vec(),
-            vec![0],
-            circuit_id.to_be_bytes().to_vec(),
-            vec![0, 0, 21],
-            tid.to_be_bytes().to_vec(),
-            response_size.to_be_bytes().to_vec(),
-            random_data[..request_size as usize].to_vec(),
-        ]
-        .concat();
-
-        let (encrypted, target) = match circuits.lock().unwrap().get_mut(&circuit_id) {
+        let cell = wrap_cell(&test_request);
+        let (encrypted_cell, target) = match rt.circuits.lock().unwrap().get_mut(&circuit_id) {
             Some(circuit) => {
-                let Ok(encrypted) = circuit.encrypt_outgoing_cell(test_request, 8) else {
+                let Ok(encrypted) = circuit.encrypt_outgoing_cell(cell, 8) else {
                     error!("Can't encrypt cell for circuit {}", circuit_id);
                     break;
                 };
@@ -148,7 +155,7 @@ pub async fn send_loop(
             }
         };
 
-        if let Ok(n) = socket.send_to(&encrypted, target).await {
+        if let Ok(n) = rt.socket.send_to(&encrypted_cell, target).await {
             results
                 .lock()
                 .unwrap()

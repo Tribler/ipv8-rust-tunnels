@@ -1,18 +1,22 @@
 use std::{
-    collections::{HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex},
+    collections::HashSet,
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
+    sync::Arc,
 };
 
 use arc_swap::ArcSwap;
-use socks5_proto::Address;
+use deku::DekuReader;
 use tokio::{net::UdpSocket, task::JoinHandle};
 
 use crate::{
     crypto::{Direction, SessionKeys},
-    payload,
+    packet::{
+        as_data_cell, check_cell_flags, could_be_bt, could_be_ipv8, decrypt_cell, encrypt_cell,
+        unwrap_cell,
+    },
+    payload::{Address, DataPayload},
+    routing::table::RoutingTable,
     socket::TunnelSettings,
-    stats::Stats,
     util,
 };
 
@@ -22,6 +26,7 @@ pub enum PeerFlag {
     ExitBt = 2,
     ExitIpv8 = 4,
     SpeedTest = 8,
+    ExitHttp = 32768,
 }
 
 #[derive(Debug)]
@@ -65,7 +70,7 @@ impl ExitSocket {
     }
 
     pub fn encrypt_outgoing_cell(&mut self, packet: Vec<u8>) -> Result<Vec<u8>, String> {
-        let encrypted_cell = payload::encrypt_cell(&packet, Direction::Backward, &mut self.keys)?;
+        let encrypted_cell = encrypt_cell(&packet, Direction::Backward, &mut self.keys)?;
         Ok(encrypted_cell)
     }
 
@@ -74,10 +79,10 @@ impl ExitSocket {
         packet: &[u8],
         max_relay_early: u8,
     ) -> Result<Vec<u8>, String> {
-        let decrypted_cell = payload::decrypt_cell(packet, Direction::Forward, &self.keys)?;
+        let decrypted_cell = decrypt_cell(packet, Direction::Forward, &self.keys)?;
         self.bytes_up += packet.len() as u32;
         self.last_activity = util::get_time();
-        payload::check_cell_flags(&decrypted_cell, max_relay_early)?;
+        check_cell_flags(&decrypted_cell, max_relay_early)?;
         Ok(decrypted_cell)
     }
 
@@ -85,25 +90,22 @@ impl ExitSocket {
         &mut self,
         decrypted_cell: Vec<u8>,
     ) -> Result<(Address, Vec<u8>), String> {
-        let tunnel_pkt = payload::unwrap_cell(&decrypted_cell);
-        if tunnel_pkt.len() <= 36 {
-            return Err("Got data packet of unexpected size".to_owned());
-        }
+        let mut cursor = std::io::Cursor::new(unwrap_cell(&decrypted_cell));
+        let mut reader = deku::reader::Reader::new(&mut cursor);
+        let data_payload = match DataPayload::from_reader_with_ctx(&mut reader, ()) {
+            Ok(p) => p,
+            Err(e) => return Err(format!("error decoding data payload: {}", e)),
+        };
 
-        let (address, offset) = payload::decode_address(&tunnel_pkt, 27)?;
-        let (_, offset) = payload::decode_address(&tunnel_pkt, offset)?;
-        let exit_pkt = &tunnel_pkt[offset..];
-        Ok((address, exit_pkt.to_vec()))
+        Ok((data_payload.dest_address, data_payload.data.data))
     }
 
     pub async fn listen_forever(
-        tunnel_socket: Arc<UdpSocket>,
-        stats: Arc<Mutex<Stats>>,
-        exits: Arc<Mutex<HashMap<u32, ExitSocket>>>,
         circuit_id: u32,
+        rt: RoutingTable,
         settings: Arc<ArcSwap<TunnelSettings>>,
     ) -> Result<(), String> {
-        let socket = Self::get_socket(circuit_id, &exits)?;
+        let socket = Self::get_socket(&rt, circuit_id)?;
         let mut buf = [0; 2048];
 
         loop {
@@ -123,20 +125,23 @@ impl ExitSocket {
                         continue;
                     }
 
-                    let (target, cell) = match exits.lock().unwrap().get_mut(&circuit_id) {
+                    let (target, cell) = match rt.exits.lock().unwrap().get_mut(&circuit_id) {
                         None => {
                             info!("Packet for unknown exit socket {}, stopping loop", circuit_id);
                             return Ok(());
                         }
                         Some(exit) => {
                             exit.bytes_down += size as u32;
-                            let dest = Address::SocketAddress(SocketAddr::from((Ipv4Addr::from(0), 0)));
-                            let origin = Address::SocketAddress(socket_addr);
+                            let dest = Address::V4(SocketAddrV4::new(Ipv4Addr::from(0), 0));
+                            let origin = match socket_addr {
+                                SocketAddr::V4(addr) => Address::V4(addr),
+                                SocketAddr::V6(addr) => Address::V6(addr),
+                            };
                             let pkt = &buf[..size].to_vec();
-                            let cell = payload::as_data_cell(prefix, circuit_id, &dest, &origin, pkt);
+                            let cell = as_data_cell(prefix, circuit_id, &dest, &origin, pkt);
 
                             let Ok(encrypted_cell) =
-                                payload::encrypt_cell(&cell, Direction::Backward, &mut exit.keys)
+                                encrypt_cell(&cell, Direction::Backward, &mut exit.keys)
                             else {
                                 error!("Error while encrypting cell for exit {}", circuit_id);
                                 continue;
@@ -145,9 +150,9 @@ impl ExitSocket {
                             (exit.peer.clone(), encrypted_cell)
                         }
                     };
-                    match tunnel_socket.send_to(&cell, target).await {
+                    match rt.socket.send_to(&cell, target).await {
                         Ok(n) => {
-                            stats.lock().unwrap().add_up(&cell, n);
+                            rt.stats.lock().unwrap().add_up(&cell, n);
                             debug!("Forwarded packet from {} to {}", socket_addr, circuit_id)
                         }
                         Err(_) => error!("Could not tunnel cell for exit {}", circuit_id),
@@ -160,11 +165,8 @@ impl ExitSocket {
         }
     }
 
-    pub fn get_socket(
-        circuit_id: u32,
-        exits: &Arc<Mutex<HashMap<u32, ExitSocket>>>,
-    ) -> Result<Arc<UdpSocket>, String> {
-        match exits.lock().unwrap().get(&circuit_id) {
+    pub fn get_socket(rt: &RoutingTable, circuit_id: u32) -> Result<Arc<UdpSocket>, String> {
+        match rt.exits.lock().unwrap().get(&circuit_id) {
             Some(exit) => {
                 if exit.socket.is_none() {
                     return Err(format!("Could not find socket for exit {}", circuit_id));
@@ -180,8 +182,8 @@ impl ExitSocket {
         prefix: &Vec<u8>,
         peer_flags: &HashSet<PeerFlag>,
     ) -> Result<(), String> {
-        let is_bt = payload::could_be_bt(packet);
-        let is_ipv8 = payload::could_be_ipv8(packet);
+        let is_bt = could_be_bt(packet);
+        let is_ipv8 = could_be_ipv8(packet);
 
         if !(is_bt && peer_flags.contains(&PeerFlag::ExitBt))
             && !(is_ipv8 && peer_flags.contains(&PeerFlag::ExitIpv8))

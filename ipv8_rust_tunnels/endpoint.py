@@ -6,7 +6,7 @@ from typing import Callable, TYPE_CHECKING
 if TYPE_CHECKING:
     from ipv8.messaging.anonymization.community import TunnelCommunity, TunnelSettings
     from ipv8.messaging.anonymization.payload import CellPayload
-    from ipv8.types import Address
+    from ipv8.messaging.interfaces.udp.endpoint import Address
 
 import asyncio
 
@@ -98,6 +98,12 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         for exit_socket in self.exit_sockets.values():
             self.rust_ep.update_exit_stats(exit_socket.circuit_id, exit_socket)
 
+    def get_peers_for_circuit(self, circuit_id: int) -> list[tuple[str, int]]:
+        """
+        Get the peers associated with this circuit.
+        """
+        return self.rust_ep.get_peers_for_circuit(circuit_id)
+
     def get_statistics(self, prefix: bytes) -> dict[int, NetworkStat]:
         """
         Get the message statistics per message identifier for the given prefix.
@@ -110,6 +116,12 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
             stat.bytes_up = counters[1]
             stat.bytes_down = counters[3]
         return result
+
+    def get_socks5_statistics(self) -> list[dict]:
+        """
+        Get a list of all Socks5 servers. Includes port number, hop-count, and number of UDP associates.
+        """
+        return self.rust_ep.get_socks5_statistics()
 
     def enable_community_statistics(self, community_prefix: bytes, enabled: bool) -> None:
         """
@@ -157,18 +169,12 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         if self.is_open():
             self.rust_ep.set_exit_address(address)
 
-    def create_udp_associate(self, port: int, hops: int) -> int:
+    def create_socks5_server(self, port: int, hops: int) -> int:
         """
-        Create a SOCKS5 UDP associate socket using the given port and hop count.
+        Create a SOCKS5 UDP server using the given port and hop count.
         Returns the port on which the socket was created (in case port 0 was given as argument).
         """
-        return self.rust_ep.create_udp_associate(port, hops)
-
-    def close_udp_associate(self, port: int) -> None:
-        """
-        Close the SOCKS5 UDP associate socket that's bound to the given port.
-        """
-        return self.rust_ep.close_udp_associate(port)
+        return self.rust_ep.create_socks5_server(port, hops)
 
     def set_udp_associate_default_remote(self, addr: Address, hops: int) -> None:
         """

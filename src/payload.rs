@@ -1,207 +1,266 @@
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::{
+    fmt::Display,
+    io::Seek,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
+};
 
-use socks5_proto::Address;
-
-use crate::crypto::{decrypt_str, encrypt_str, Direction, SessionKeys};
-use crate::util::Result;
+use deku::{writer::Writer, DekuError, DekuRead, DekuReader, DekuWrite, DekuWriter};
 
 pub const NO_CRYPTO_PACKETS: [u8; 4] = [2, 3, 31, 33];
 
-pub fn encrypt_cell(
-    cell: &[u8],
-    direction: Direction,
-    keys_list: &mut Vec<SessionKeys>,
-) -> Result<Vec<u8>> {
-    // No encryption needed, cell is plaintext
-    if cell[27] != 0 {
-        return Ok(cell.to_vec());
+#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
+#[deku(endian = "big")]
+pub struct DataPayload {
+    pub header: Header,
+    pub dest_address: Address,
+    pub org_address: Address,
+    pub data: Raw,
+}
+
+#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
+#[deku(endian = "big")]
+pub struct TestRequestPayload {
+    pub header: Header,
+    pub identifier: u32,
+    pub response_size: u16,
+    pub request: Raw,
+}
+
+#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
+#[deku(endian = "big")]
+pub struct TestResponsePayload {
+    pub header: Header,
+    pub identifier: u32,
+    pub response: Raw,
+}
+
+#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
+#[deku(endian = "big")]
+pub struct HTTPRequestPayload {
+    pub header: Header,
+    pub identifier: u32,
+    pub target: Address,
+    pub request: VarLenH,
+}
+
+#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
+#[deku(endian = "big")]
+pub struct HTTPResponsePayload {
+    pub header: Header,
+    pub identifier: u32,
+    pub part: u16,
+    pub total: u16,
+    pub response: VarLenH,
+}
+
+#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
+#[deku(endian = "endian", ctx = "endian: deku::ctx::Endian")]
+pub struct Header {
+    #[deku(count = "22")]
+    pub prefix: Vec<u8>,
+    pub msg_id: u8,
+    pub circuit_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
+#[deku(endian = "endian", ctx = "endian: deku::ctx::Endian")]
+pub struct VarLenH {
+    #[deku(update = "self.data.len()")]
+    pub data_len: u16,
+    #[deku(count = "data_len")]
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
+#[deku(endian = "endian", ctx = "endian: deku::ctx::Endian")]
+pub struct VarLenB {
+    #[deku(update = "self.data.len()")]
+    pub data_len: u8,
+    #[deku(count = "data_len")]
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
+#[deku(endian = "endian", ctx = "endian: deku::ctx::Endian")]
+pub struct Raw {
+    #[deku(reader = "Raw::read(deku::reader)", writer = "Raw::write(deku::writer, &self.data)")]
+    pub data: Vec<u8>,
+}
+
+impl Raw {
+    fn read<R: std::io::Read + std::io::Seek>(
+        reader: &mut deku::reader::Reader<R>,
+    ) -> Result<Vec<u8>, DekuError> {
+        let Ok(begin_pos) = reader.stream_position() else {
+            return Err(DekuError::Parse(std::borrow::Cow::from(format!(
+                "failed getting stream position"
+            ))));
+        };
+        let Ok(end_pos) = reader.seek(deku::no_std_io::SeekFrom::End(0)) else {
+            return Err(DekuError::Parse(std::borrow::Cow::from(format!(
+                "failed getting stream length"
+            ))));
+        };
+        let len = (end_pos - begin_pos) as usize;
+        let mut buf = vec![0; len];
+        let _ = reader.seek(deku::no_std_io::SeekFrom::Start(begin_pos));
+        let _ = reader.read_bytes(len as usize, &mut buf, deku::ctx::Order::Msb0);
+        Ok(buf)
     }
-    let mut message = (&cell[29..]).to_vec();
-    for keys in keys_list.iter_mut().rev() {
-        message = match encrypt_str(message, keys, direction) {
-            Ok(result) => result,
-            Err(error) => return Err(format!("Got error while encrypting cell: {}", error)),
-        }
-    }
-    let mut result = (&cell[..29]).to_vec();
-    result.append(&mut message);
-    Ok(result)
-}
 
-pub fn decrypt_cell(cell: &[u8], direction: Direction, keys_list: &Vec<SessionKeys>) -> Result<Vec<u8>> {
-    // No decryption needed, cell is plaintext
-    if cell[27] != 0 {
-        return Ok(cell.to_vec());
-    }
-    let mut message = (&cell[29..]).to_vec();
-    for keys in keys_list {
-        message = match decrypt_str(message, keys, direction) {
-            Ok(result) => result,
-            Err(error) => return Err(format!("Got error while decrypting cell: {}", error)),
-        }
-    }
-    let mut result = (&cell[..29]).to_vec();
-    result.append(&mut message);
-    Ok(result)
-}
-
-pub fn as_data_cell(
-    prefix: &Vec<u8>,
-    circuit_id: u32,
-    destination: &Address,
-    origin: &Address,
-    packet: &Vec<u8>,
-) -> Vec<u8> {
-    let circuit_id = u32::to_be_bytes(circuit_id).to_vec();
-    let dest_address = encode_address(destination);
-    let org_address = encode_address(origin);
-    let data_pkt = [
-        prefix.to_vec(),
-        vec![1],
-        circuit_id,
-        dest_address,
-        org_address,
-        packet.to_vec(),
-    ]
-    .concat();
-    wrap_cell(&data_pkt)
-}
-
-pub fn wrap_cell(packet: &Vec<u8>) -> Vec<u8> {
-    let prefix = &packet[..22];
-    let msg_id = &packet[22..23];
-    let circuit_id = &packet[23..27];
-    #[rustfmt::skip]
-    let plaintext: &[u8] = if NO_CRYPTO_PACKETS.contains(&packet[22]) { &[1] } else { &[0] };
-    let msg = &packet[27..];
-    [prefix, &[0], circuit_id, plaintext, &[0], msg_id, msg].concat()
-}
-
-pub fn unwrap_cell(cell: &Vec<u8>) -> Vec<u8> {
-    let prefix = &cell[..22];
-    let circuit_id = &cell[23..27];
-    let msg_id = &cell[29..30];
-    let msg = &cell[30..];
-    [prefix, msg_id, circuit_id, msg].concat()
-}
-
-pub fn swap_circuit_id(cell: &Vec<u8>, circuit_id: u32) -> Vec<u8> {
-    [&cell[..23], &u32::to_be_bytes(circuit_id).to_vec(), &cell[27..]].concat()
-}
-
-pub fn is_cell(prefix: &Vec<u8>, packet: &[u8]) -> bool {
-    packet.len() > 29 && has_prefix(prefix, packet) && packet[22] == 0
-}
-
-pub fn has_prefix(prefix: &[u8], packet: &[u8]) -> bool {
-    for i in 0..prefix.len() {
-        if packet[i] != prefix[i] {
-            return false;
-        }
-    }
-    true
-}
-
-pub fn has_prefixes(prefixes: &Vec<Vec<u8>>, packet: &[u8]) -> bool {
-    for prefix in prefixes.iter() {
-        if has_prefix(prefix, packet) {
-            return true;
-        }
-    }
-    false
-}
-
-pub fn decode_address(packet: &[u8], offset: usize) -> Result<(Address, usize)> {
-    let buf = &packet[offset..];
-    match buf[0] {
-        1 => {
-            let addr = Ipv4Addr::new(buf[1], buf[2], buf[3], buf[4]);
-            let port = u16::from_be_bytes([buf[5], buf[6]]);
-            Ok((Address::SocketAddress(SocketAddr::from((addr, port))), offset + 7))
-        }
-        2 => {
-            let len = u16::from_be_bytes([buf[1], buf[2]]) as usize;
-            let port = u16::from_be_bytes([buf[len + 3], buf[len + 4]]);
-            Ok((Address::DomainAddress(buf[3..len + 3].to_vec(), port), offset + 5 + len))
-        }
-        3 => {
-            let addr = Ipv6Addr::new(
-                u16::from_be_bytes([buf[1], buf[2]]),
-                u16::from_be_bytes([buf[3], buf[4]]),
-                u16::from_be_bytes([buf[5], buf[6]]),
-                u16::from_be_bytes([buf[7], buf[8]]),
-                u16::from_be_bytes([buf[9], buf[10]]),
-                u16::from_be_bytes([buf[11], buf[12]]),
-                u16::from_be_bytes([buf[13], buf[14]]),
-                u16::from_be_bytes([buf[15], buf[16]]),
-            );
-            let port = u16::from_be_bytes([buf[17], buf[18]]);
-            Ok((Address::SocketAddress(SocketAddr::from((addr, port))), offset + 19))
-        }
-        _ => Err(format!("Invalid address type {}", buf[0])),
+    fn write<W: std::io::Write + std::io::Seek>(
+        writer: &mut Writer<W>,
+        data: &Vec<u8>,
+    ) -> Result<(), DekuError> {
+        data.to_writer(writer, ())
     }
 }
 
-pub fn encode_address(address: &Address) -> Vec<u8> {
-    match address {
-        Address::SocketAddress(SocketAddr::V4(addr)) => {
-            let mut result: Vec<u8> = vec![1];
-            result.extend_from_slice(&addr.ip().octets());
-            result.extend_from_slice(&u16::to_be_bytes(addr.port()));
-            result
-        }
-        Address::DomainAddress(addr, port) => {
-            let mut result: Vec<u8> = vec![2];
-            result.extend_from_slice(&u16::to_be_bytes(addr.len() as u16));
-            result.extend_from_slice(&addr);
-            result.extend_from_slice(&u16::to_be_bytes(*port));
-            result
-        }
-        Address::SocketAddress(SocketAddr::V6(addr)) => {
-            let mut result: Vec<u8> = vec![3];
-            result.extend_from_slice(&addr.ip().octets());
-            result.extend_from_slice(&u16::to_be_bytes(addr.port()));
-            result
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, DekuRead, DekuWrite)]
+#[deku(id_type = "u8")]
+#[deku(endian = "endian", ctx = "endian: deku::ctx::Endian")]
+pub enum Address {
+    #[deku(id = 1)]
+    V4(
+        #[deku(
+            reader = "Address::read_v4(deku::reader, endian)",
+            writer = "Address::write(deku::writer, &self)"
+        )]
+        SocketAddrV4,
+    ),
+    #[deku(id = 3)]
+    V6(
+        #[deku(
+            reader = "Address::read_v6(deku::reader, endian)",
+            writer = "Address::write(deku::writer, &self)"
+        )]
+        SocketAddrV6,
+    ),
+    #[deku(id = 2)]
+    DomainAddress(
+        #[deku(
+            reader = "Address::read_domain(deku::reader, endian)",
+            writer = "Address::write(deku::writer, &self)"
+        )]
+        (Vec<u8>, u16),
+    ),
+}
+
+impl Address {
+    fn read_v4<R: std::io::Read + std::io::Seek>(
+        reader: &mut deku::reader::Reader<R>,
+        endian: deku::ctx::Endian,
+    ) -> Result<SocketAddrV4, DekuError> {
+        let ip = Ipv4Addr::from_reader_with_ctx(reader, endian)?;
+        let port = u16::from_reader_with_ctx(reader, endian)?;
+        Ok(SocketAddrV4::new(ip, port))
+    }
+
+    fn read_v6<R: std::io::Read + std::io::Seek>(
+        reader: &mut deku::reader::Reader<R>,
+        endian: deku::ctx::Endian,
+    ) -> Result<SocketAddrV6, DekuError> {
+        let ip = Ipv6Addr::from_reader_with_ctx(reader, endian)?;
+        let port = u16::from_reader_with_ctx(reader, endian)?;
+        Ok(SocketAddrV6::new(ip, port, 0, 0))
+    }
+
+    fn read_domain<R: std::io::Read + std::io::Seek>(
+        reader: &mut deku::reader::Reader<R>,
+        endian: deku::ctx::Endian,
+    ) -> Result<(Vec<u8>, u16), DekuError> {
+        let host = VarLenH::from_reader_with_ctx(reader, endian)?.data;
+        let port = u16::from_reader_with_ctx(reader, endian)?;
+        Ok((host.to_vec(), port))
+    }
+
+    fn write<W: std::io::Write + std::io::Seek>(
+        writer: &mut Writer<W>,
+        address: &Address,
+    ) -> Result<(), DekuError> {
+        let endian = deku::ctx::Endian::Big;
+        match address {
+            Address::V4(addr) => {
+                addr.ip().octets().to_writer(writer, endian)?;
+                addr.port().to_writer(writer, endian)
+            }
+            Address::DomainAddress((addr, port)) => {
+                VarLenH {
+                    data_len: addr.len() as u16,
+                    data: addr.to_vec(),
+                }
+                .to_writer(writer, endian)?;
+                port.to_writer(writer, endian)
+            }
+            Address::V6(addr) => {
+                addr.ip().octets().to_writer(writer, endian)?;
+                addr.port().to_writer(writer, endian)
+            }
         }
     }
 }
 
-pub fn check_cell_flags(cell: &[u8], max_relay_early: u8) -> Result<()> {
-    if (cell[28] == 0 && cell[29] == 4) || max_relay_early <= 0 {
-        return Err("Missing or unexpected relay_early flag".to_owned());
+impl Display for Address {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Address::V4(addr) => write!(f, "{addr}"),
+            Address::V6(addr) => write!(f, "{addr}"),
+            Address::DomainAddress((host, port)) => {
+                write!(f, "{hostname}:{port}", hostname = String::from_utf8_lossy(host),)
+            }
+        }
     }
-    if cell[27] != 0 && !NO_CRYPTO_PACKETS.contains(&cell[29]) {
-        return Err("Only create/created can have plaintext flag set".to_owned());
+}
+
+#[derive(Debug, Clone, PartialEq, DekuRead, DekuWrite)]
+#[deku(endian = "big")]
+pub struct Socks5Payload {
+    pub rsv: u16,
+    pub frag: u8,
+    #[deku(
+        reader = "Socks5Payload::read_addr(deku::reader)",
+        writer = "Socks5Payload::write_addr(deku::writer, &self.dst)"
+    )]
+    pub dst: Address,
+    pub data: Raw,
+}
+
+impl Socks5Payload {
+    fn read_addr<R: std::io::Read + std::io::Seek>(
+        reader: &mut deku::reader::Reader<R>,
+    ) -> Result<Address, DekuError> {
+        let endian = deku::ctx::Endian::Big;
+        match u8::from_reader_with_ctx(reader, endian)? {
+            1 => Ok(Address::V4(Address::read_v4(reader, endian)?)),
+            4 => Ok(Address::V6(Address::read_v6(reader, endian)?)),
+            3 => {
+                let host = VarLenB::from_reader_with_ctx(reader, deku::ctx::Endian::Big)?.data;
+                let port = u16::from_reader_with_ctx(reader, endian)?;
+                Ok(Address::DomainAddress((host.to_vec(), port)))
+            }
+            t => Err(DekuError::Parse(std::borrow::Cow::from(format!("unknown address type: {}", t)))),
+        }
     }
-    Ok(())
-}
 
-pub fn could_be_utp(packet: &[u8]) -> bool {
-    packet.len() >= 20 && (packet[0] >> 4) <= 4 && (packet[0] & 15) == 1 && packet[1] <= 3
-}
-
-pub fn could_be_udp_tracker(packet: &[u8]) -> bool {
-    (packet.len() >= 8 && u32::from_be_bytes(packet[..4].try_into().unwrap()) <= 3)
-        || (packet.len() >= 12 && u32::from_be_bytes(packet[8..12].try_into().unwrap()) <= 3)
-}
-
-pub fn could_be_dht(packet: &[u8]) -> bool {
-    packet.len() > 1 && packet[0] == b'd' && packet[packet.len() - 1] == b'e'
-}
-
-pub fn could_be_bt(packet: &[u8]) -> bool {
-    could_be_utp(packet) || could_be_udp_tracker(packet) || could_be_dht(packet)
-}
-
-pub fn could_be_ipv8(packet: &[u8]) -> bool {
-    packet.len() >= 23 && packet[0] == 0 && (packet[1] == 1 || packet[1] == 2)
-}
-
-pub fn ip_to_circuit_id(ip: &Ipv4Addr) -> u32 {
-    u32::from_be_bytes(ip.octets().try_into().unwrap())
-}
-
-pub fn circuit_id_to_ip(circuit_id: u32) -> Ipv4Addr {
-    let buf = u32::to_be_bytes(circuit_id);
-    Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3])
+    fn write_addr<W: std::io::Write + std::io::Seek>(
+        writer: &mut Writer<W>,
+        address: &Address,
+    ) -> Result<(), DekuError> {
+        let endian = deku::ctx::Endian::Big;
+        let atyp: u8 = match address {
+            Address::V4(_) => 1,
+            Address::V6(_) => 4,
+            Address::DomainAddress((host, port)) => {
+                u8::to_writer(&3, writer, endian)?;
+                VarLenB {
+                    data_len: host.len() as u8,
+                    data: host.to_vec(),
+                }
+                .to_writer(writer, endian)?;
+                return port.to_writer(writer, endian);
+            }
+        };
+        atyp.to_writer(writer, endian)?;
+        Address::write(writer, address)
+    }
 }
