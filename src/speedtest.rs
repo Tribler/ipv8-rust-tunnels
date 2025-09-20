@@ -4,7 +4,6 @@ use std::{
     time::Duration,
 };
 
-use arc_swap::ArcSwap;
 use pyo3::{types::IntoPyDict, PyObject, Python};
 use rand::{Rng, RngCore};
 use tokio::sync::broadcast;
@@ -12,14 +11,12 @@ use tokio::sync::broadcast;
 use crate::{
     payload::{Header, Raw, TestRequestPayload},
     routing::table::RoutingTable,
-    socket::TunnelSettings,
     util::get_time_ms,
 };
 
 pub async fn run_test(
     circuit_id: u32,
     rt: RoutingTable,
-    settings: Arc<ArcSwap<TunnelSettings>>,
     test_time: u16,
     request_size: u16,
     response_size: u16,
@@ -32,22 +29,22 @@ pub async fn run_test(
 
     let mut cb_task = None;
     if callback_interval > 0 {
-        cb_task = Some(settings.load().handle.spawn(cb_loop(
+        cb_task = Some(rt.settings.load().handle.spawn(cb_loop(
             Python::with_gil(|py| callback.clone_ref(py)),
             callback_interval,
             results.clone(),
         )));
     }
 
-    let recv_task = settings.load().handle.spawn(receive_loop(
-        settings.load().test_channel.clone(),
+    let recv_task = rt.settings.load().handle.spawn(receive_loop(
+        rt.settings.load().test_channel.clone(),
         results.clone(),
         rtts.clone(),
     ));
 
     debug!("Testing circuit {}..", circuit_id);
-    let prefix = settings.load().prefix.clone();
-    let send_task = settings.load().handle.spawn(send_loop(
+    let prefix = rt.settings.load().prefix.clone();
+    let send_task = rt.settings.load().handle.spawn(send_loop(
         circuit_id,
         prefix,
         rt.clone(),

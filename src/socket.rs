@@ -70,20 +70,11 @@ impl TunnelSettings {
 pub struct TunnelSocket {
     rt: RoutingTable,
     socks_servers: Arc<Mutex<HashMap<SocketAddr, Socks5Server>>>,
-    settings: Arc<ArcSwap<TunnelSettings>>,
 }
 
 impl TunnelSocket {
-    pub fn new(
-        rt: RoutingTable,
-        socks_servers: Arc<Mutex<HashMap<SocketAddr, Socks5Server>>>,
-        settings: Arc<ArcSwap<TunnelSettings>>,
-    ) -> Self {
-        TunnelSocket {
-            rt,
-            socks_servers,
-            settings,
-        }
+    pub fn new(rt: RoutingTable, socks_servers: Arc<Mutex<HashMap<SocketAddr, Socks5Server>>>) -> Self {
+        TunnelSocket { rt, socks_servers }
     }
 
     pub async fn listen_forever(&mut self) {
@@ -96,7 +87,7 @@ impl TunnelSocket {
                     let packet = &buf[..n];
                     self.rt.stats.lock().unwrap().add_down(packet, n);
 
-                    let guard = ArcSwapAny::load(&self.settings);
+                    let guard = ArcSwapAny::load(&self.rt.settings);
 
                     if !is_cell(&guard.prefix, &packet) {
                         if has_prefixes(&guard.prefixes, packet) {
@@ -167,7 +158,7 @@ impl TunnelSocket {
         addr: SocketAddr,
         circuit_id: u32,
     ) -> Result<usize> {
-        let guard = ArcSwap::load(&self.settings);
+        let guard = ArcSwap::load(&self.rt.settings);
         let (data, cell_id, session_hops, to_python) =
             match self.rt.circuits.lock().unwrap().get_mut(&circuit_id) {
                 Some(circuit) => {
@@ -237,7 +228,7 @@ impl TunnelSocket {
                     packet.to_vec()
                 } else {
                     trace!("Relaying cell from {} to {} ({})", circuit_id, relay.circuit_id, target);
-                    relay.convert_incoming_cell(packet, self.settings.load().max_relay_early)?
+                    relay.convert_incoming_cell(packet, self.rt.settings.load().max_relay_early)?
                 };
                 Some((target, cell, relay.rendezvous_relay))
             }
@@ -265,7 +256,7 @@ impl TunnelSocket {
         addr: SocketAddr,
         circuit_id: u32,
     ) -> Result<usize> {
-        let guard = ArcSwap::load(&self.settings);
+        let guard = ArcSwap::load(&self.rt.settings);
         let (data, cell_id, target, to_python) = match self.rt.exits.lock().unwrap().get_mut(&circuit_id)
         {
             Some(exit) => {
@@ -337,13 +328,12 @@ impl TunnelSocket {
                     return exit.socket.clone();
                 };
 
-                let guard = self.settings.load();
+                let guard = self.rt.settings.load();
                 exit.open_socket(guard.exit_addr.clone());
                 let circuit_id = exit.circuit_id.clone();
                 let rt = self.rt.clone();
-                let settings = self.settings.clone();
                 let task = guard.handle.spawn(async move {
-                    match ExitSocket::listen_forever(circuit_id, rt, settings).await {
+                    match ExitSocket::listen_forever(circuit_id, rt).await {
                         Ok(_) => {}
                         Err(e) => error!("Error for exit {}: {}", circuit_id, e),
                     };
@@ -399,7 +389,7 @@ impl TunnelSocket {
             29 => self.on_http_response(address, circuit_id, &cell).await,
             _ => {
                 trace!("Handover cell({}) for circuit {} to Python", cell_id, circuit_id);
-                let guard = ArcSwap::load(&self.settings);
+                let guard = ArcSwap::load(&self.rt.settings);
                 self.call_python(&guard.callback, &address, &cell);
                 Ok(cell.len())
             }
@@ -455,6 +445,7 @@ impl TunnelSocket {
             Err(e) => return Err(format!("error while decoding test response: {}", e)),
         };
         let _ = self
+            .rt
             .settings
             .load()
             .test_channel
@@ -469,7 +460,7 @@ impl TunnelSocket {
         cell: &[u8],
     ) -> Result<usize> {
         debug!("Got http-request from circuit {}", circuit_id);
-        if !self.settings.load().peer_flags.contains(&PeerFlag::ExitHttp) {
+        if !self.rt.settings.load().peer_flags.contains(&PeerFlag::ExitHttp) {
             return Err(format!("dropping http-request, exiting HTTP is disabled"));
         }
         let mut cursor = std::io::Cursor::new(unwrap_cell(&cell.to_vec()));

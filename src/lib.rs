@@ -45,7 +45,6 @@ create_exception!(ipv8_rust_tunnels, RustError, PyException);
 pub struct Endpoint {
     addr: String,
     rt: Option<RoutingTable>,
-    settings: Option<Arc<ArcSwap<TunnelSettings>>>,
     socks_servers: Arc<Mutex<HashMap<SocketAddr, Socks5Server>>>,
     tokio_shutdown: Option<Sender<()>>,
 }
@@ -57,7 +56,6 @@ impl Endpoint {
         Endpoint {
             addr: format!("{}:{}", listen_addr, list_port),
             rt: None,
-            settings: None,
             socks_servers: Arc::new(Mutex::new(HashMap::new())),
             tokio_shutdown: None,
         }
@@ -94,7 +92,6 @@ impl Endpoint {
         self.tokio_shutdown = Some(shutdown_tx);
 
         let settings = Arc::new(ArcSwap::from_pointee(TunnelSettings::new(callback, rt)));
-        self.settings = Some(settings.clone());
 
         info!("Spawning socket task");
         let addr = self.addr.clone();
@@ -114,7 +111,7 @@ impl Endpoint {
             let rt = RoutingTable::new(socket, settings.clone());
             rt_tx.send(rt.clone()).expect("Failed to send Tokio socket");
 
-            let mut ts = TunnelSocket::new(rt, socks_servers, settings);
+            let mut ts = TunnelSocket::new(rt, socks_servers);
             ts.listen_forever().await;
         });
         let Ok(rt) = rt_rx.recv() else {
@@ -135,23 +132,18 @@ impl Endpoint {
         }
         self.tokio_shutdown = None;
         self.rt = None;
-        self.settings = None;
 
         Ok(())
     }
 
     fn create_socks5_server(&mut self, port: u16, hops: u8) -> PyResult<u16> {
         let rt = self.get_routing_table()?;
-        let Some(settings) = self.settings.clone() else {
-            return Err(RustError::new_err("No settings available"));
-        };
-
         let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
         let socks_servers = self.socks_servers.clone();
         let rt = rt.clone();
         let (addr_tx, addr_rx) = std::sync::mpsc::channel();
 
-        settings.load().handle.spawn(async move {
+        rt.settings.load().handle.spawn(async move {
             let listener = match TcpListener::bind(addr).await {
                 Ok(listener) => listener,
                 Err(e) => {
@@ -161,7 +153,7 @@ impl Endpoint {
             };
             let listen_addr = listener.local_addr().unwrap();
             info!("Socks5 server (hops={}) listening on: {:?}", hops, listen_addr);
-            let mut server = Socks5Server::new(rt, settings, hops);
+            let mut server = Socks5Server::new(rt, hops);
             socks_servers.lock().unwrap().insert(listen_addr, server.clone());
             addr_tx.send(listen_addr).expect("Failed to send Socks5 server");
             let _ = server.listen_forever(listener).await;
@@ -176,10 +168,7 @@ impl Endpoint {
         address: &Bound<'_, PyTuple>,
         hops: u8,
     ) -> PyResult<()> {
-        let Some(settings) = &self.settings else {
-            return Err(RustError::new_err("No settings available"));
-        };
-
+        let rt = self.get_routing_table()?;
         let socket_addr = parse_address(address)?;
         for (_, server) in self.socks_servers.lock().unwrap().iter_mut() {
             if server.hops != hops {
@@ -189,7 +178,7 @@ impl Endpoint {
                 // Set peer_addr for the Socks5 socket if it hasn't been set yet.
                 if associate.socket.peer_addr().is_err() {
                     let socket = associate.socket.clone();
-                    settings.load().handle.spawn(async move {
+                    rt.settings.load().handle.spawn(async move {
                         let _ = socket.connect(socket_addr).await;
                     });
                 }
@@ -224,14 +213,9 @@ impl Endpoint {
         callback_interval: u16,
     ) -> PyResult<()> {
         let rt = self.get_routing_table()?;
-        let Some(settings) = &self.settings else {
-            return Err(RustError::new_err("No settings available"));
-        };
-
-        settings.load().handle.spawn(speedtest::run_test(
+        rt.settings.load().handle.spawn(speedtest::run_test(
             circuit_id,
             rt.clone(),
-            settings.clone(),
             test_time,
             request_size,
             response_size,
@@ -239,7 +223,6 @@ impl Endpoint {
             callback,
             callback_interval,
         ));
-
         Ok(())
     }
 
@@ -323,14 +306,11 @@ impl Endpoint {
     }
 
     fn set_prefix(&mut self, prefix: &Bound<'_, PyBytes>, py: Python<'_>) -> PyResult<()> {
-        if let Some(settings) = &self.settings {
-            let mut new_settings = TunnelSettings::clone(settings.load_full(), py);
-            new_settings.prefix = prefix.as_bytes().to_vec();
-            info!("Set tunnel prefix: {:?}", new_settings.prefix);
-            settings.swap(Arc::new(new_settings));
-        } else {
-            error!("Failed to set tunnel prefix");
-        }
+        let rt = self.get_routing_table()?;
+        let mut new_settings = TunnelSettings::clone(rt.settings.load_full(), py);
+        new_settings.prefix = prefix.as_bytes().to_vec();
+        info!("Set tunnel prefix: {:?}", new_settings.prefix);
+        rt.settings.swap(Arc::new(new_settings));
         Ok(())
     }
 
@@ -344,25 +324,19 @@ impl Endpoint {
             }
         }
 
-        if let Some(settings) = &self.settings {
-            let mut new_settings = TunnelSettings::clone(settings.load_full(), py);
-            new_settings.prefixes = prefixes;
-            info!("Set community prefixes: {:?}", new_settings.prefixes);
-            settings.swap(Arc::new(new_settings));
-        } else {
-            error!("Failed to set community prefixes");
-        }
+        let rt = self.get_routing_table()?;
+        let mut new_settings = TunnelSettings::clone(rt.settings.load_full(), py);
+        new_settings.prefixes = prefixes;
+        info!("Set community prefixes: {:?}", new_settings.prefixes);
+        rt.settings.swap(Arc::new(new_settings));
         Ok(())
     }
     fn set_max_relay_early(&mut self, max_relay_early: u8, py: Python<'_>) -> PyResult<()> {
-        if let Some(settings) = &self.settings {
-            let mut new_settings = TunnelSettings::clone(settings.load_full(), py);
-            new_settings.max_relay_early = max_relay_early;
-            info!("Set maximum number of relay early cells: {}", new_settings.max_relay_early);
-            settings.swap(Arc::new(new_settings));
-        } else {
-            error!("Failed to set maximum number of relay early cells");
-        }
+        let rt = self.get_routing_table()?;
+        let mut new_settings = TunnelSettings::clone(rt.settings.load_full(), py);
+        new_settings.max_relay_early = max_relay_early;
+        info!("Set maximum number of relay early cells: {}", new_settings.max_relay_early);
+        rt.settings.swap(Arc::new(new_settings));
         Ok(())
     }
 
@@ -382,27 +356,21 @@ impl Endpoint {
             });
         }
 
-        if let Some(settings) = &self.settings {
-            let mut new_settings = TunnelSettings::clone(settings.load_full(), py);
-            new_settings.peer_flags = peer_flags;
-            info!("Set peer flags: {:?}", new_settings.peer_flags);
-            settings.swap(Arc::new(new_settings));
-        } else {
-            error!("Failed to set peer flags");
-        }
+        let rt = self.get_routing_table()?;
+        let mut new_settings = TunnelSettings::clone(rt.settings.load_full(), py);
+        new_settings.peer_flags = peer_flags;
+        info!("Set peer flags: {:?}", new_settings.peer_flags);
+        rt.settings.swap(Arc::new(new_settings));
         Ok(())
     }
 
     fn set_exit_address(&mut self, address: &Bound<'_, PyTuple>, py: Python<'_>) -> PyResult<()> {
         let exit_addr = parse_address(address)?;
-        if let Some(settings) = &self.settings {
-            let mut new_settings = TunnelSettings::clone(settings.load_full(), py);
-            new_settings.exit_addr = exit_addr;
-            info!("Set exit address: {:?}", new_settings.exit_addr);
-            settings.swap(Arc::new(new_settings));
-        } else {
-            error!("Failed to set exit address");
-        }
+        let rt = self.get_routing_table()?;
+        let mut new_settings = TunnelSettings::clone(rt.settings.load_full(), py);
+        new_settings.exit_addr = exit_addr;
+        info!("Set exit address: {:?}", new_settings.exit_addr);
+        rt.settings.swap(Arc::new(new_settings));
         Ok(())
     }
 
@@ -435,7 +403,7 @@ impl Endpoint {
     }
 
     fn is_open(&mut self) -> bool {
-        self.rt.is_some() && self.settings.is_some()
+        self.rt.is_some()
     }
 
     fn send(&mut self, address: &Bound<'_, PyTuple>, bytes: &Bound<'_, PyBytes>) -> PyResult<()> {
@@ -449,7 +417,7 @@ impl Endpoint {
         let rt = self.get_routing_table()?;
         let socket_addr = parse_address(address)?;
         let packet = bytes.as_bytes().to_vec();
-        let guard = self.settings.clone().unwrap().load();
+        let guard = rt.settings.load();
 
         if !is_cell(&guard.prefix, &packet) {
             error!("Trying to send invalid cell");
@@ -606,13 +574,9 @@ impl Endpoint {
             Ok(_) => rt.stats.lock().unwrap().add_up(&packet, packet.len()),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // The socket is busy, so we'll retry on the Tokio thread and await it.
-                let Some(settings) = &self.settings else {
-                    return Err(RustError::new_err("No settings available"));
-                };
-
                 let cloned_socket = rt.socket.clone();
                 let cloned_stats = rt.stats.clone();
-                settings.load().handle.spawn(async move {
+                rt.settings.load().handle.spawn(async move {
                     match cloned_socket.send_to(&packet, address).await {
                         Ok(_) => cloned_stats.lock().unwrap().add_up(&packet, packet.len()),
                         Err(e) => error!("Could not send packet to {}: {}", address, e.to_string()),

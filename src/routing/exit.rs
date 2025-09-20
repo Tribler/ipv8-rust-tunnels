@@ -4,7 +4,6 @@ use std::{
     sync::Arc,
 };
 
-use arc_swap::ArcSwap;
 use deku::DekuReader;
 use tokio::{net::UdpSocket, task::JoinHandle};
 
@@ -16,7 +15,6 @@ use crate::{
     },
     payload::{Address, DataPayload},
     routing::table::RoutingTable,
-    socket::TunnelSettings,
     util,
 };
 
@@ -100,11 +98,7 @@ impl ExitSocket {
         Ok((data_payload.dest_address, data_payload.data.data))
     }
 
-    pub async fn listen_forever(
-        circuit_id: u32,
-        rt: RoutingTable,
-        settings: Arc<ArcSwap<TunnelSettings>>,
-    ) -> Result<(), String> {
+    pub async fn listen_forever(circuit_id: u32, rt: RoutingTable) -> Result<(), String> {
         let socket = Self::get_socket(&rt, circuit_id)?;
         let mut buf = [0; 2048];
 
@@ -118,7 +112,7 @@ impl ExitSocket {
                         }
                     }
 
-                    let guard = settings.load();
+                    let guard = rt.settings.load();
                     let prefix = &guard.prefix;
                     if let Err(e) = Self::check_if_allowed(&buf[..size], prefix, &guard.peer_flags) {
                         debug!("{}", e);

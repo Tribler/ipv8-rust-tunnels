@@ -1,4 +1,3 @@
-use arc_swap::ArcSwap;
 use deku::DekuReader;
 use rand::{seq::IteratorRandom, Rng};
 use socks5_proto::Address as Socks5Address;
@@ -25,24 +24,21 @@ use crate::{
         exit::PeerFlag,
         table::RoutingTable,
     },
-    socket::TunnelSettings,
     util,
 };
 
 #[derive(Debug, Clone)]
 pub struct Socks5Server {
     pub rt: RoutingTable,
-    pub settings: Arc<ArcSwap<TunnelSettings>>,
     pub hops: u8,
     pub associates: Arc<Mutex<Vec<UDPAssociate>>>,
     pub local_addr: Option<SocketAddr>,
 }
 
 impl Socks5Server {
-    pub fn new(rt: RoutingTable, settings: Arc<ArcSwap<TunnelSettings>>, hops: u8) -> Self {
+    pub fn new(rt: RoutingTable, hops: u8) -> Self {
         Self {
             rt,
-            settings,
             hops,
             associates: Arc::new(Mutex::new(Vec::new())),
             local_addr: None,
@@ -116,8 +112,7 @@ impl Socks5Server {
                     }
                 };
 
-                let mut associate =
-                    UDPAssociate::new(self.rt.clone(), self.settings.clone(), self.hops, socket);
+                let mut associate = UDPAssociate::new(self.rt.clone(), self.hops, socket);
                 self.associates.lock().unwrap().push(associate.clone());
 
                 match associate.handle_associate().await {
@@ -211,7 +206,7 @@ impl Socks5Server {
         let identifier: u32 = rand::rng().random();
         let payload = payload::HTTPRequestPayload {
             header: payload::Header {
-                prefix: self.settings.load().prefix.clone(),
+                prefix: self.rt.settings.load().prefix.clone(),
                 msg_id: 28,
                 circuit_id: cid,
             },
@@ -284,22 +279,15 @@ impl Socks5Server {
 pub struct UDPAssociate {
     pub rt: RoutingTable,
     pub hops: u8,
-    pub settings: Arc<ArcSwap<TunnelSettings>>,
     pub socket: Arc<UdpSocket>,
     pub addr_to_cid: Arc<Mutex<HashMap<Address, u32>>>,
 }
 
 impl UDPAssociate {
-    pub fn new(
-        rt: RoutingTable,
-        settings: Arc<ArcSwap<TunnelSettings>>,
-        hops: u8,
-        socket: Arc<UdpSocket>,
-    ) -> Self {
+    pub fn new(rt: RoutingTable, hops: u8, socket: Arc<UdpSocket>) -> Self {
         Self {
             rt,
             hops,
-            settings,
             socket,
             addr_to_cid: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -362,7 +350,7 @@ impl UDPAssociate {
 
         match self.rt.circuits.lock().unwrap().get_mut(&circuit_id) {
             Some(circuit) => {
-                let guard = self.settings.load();
+                let guard = self.rt.settings.load();
                 let max_relay_early = guard.max_relay_early;
                 let prefix = &guard.prefix;
                 let origin = Address::V4(SocketAddrV4::new(Ipv4Addr::from(0), 0));

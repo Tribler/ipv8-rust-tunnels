@@ -47,12 +47,10 @@ impl RoutingTable {
         let payload_data = payload.to_bytes().unwrap();
         let cell = wrap_cell(&payload_data);
         let (encrypted_cell, target) = match self.circuits.lock().unwrap().get_mut(&circuit_id) {
-            Some(circuit) => {
-                (
-                    circuit.encrypt_outgoing_cell(cell, self.settings.load().max_relay_early)?,
-                    circuit.peer.clone(),
-                )
-            }
+            Some(circuit) => (
+                circuit.encrypt_outgoing_cell(cell, self.settings.load().max_relay_early)?,
+                circuit.peer.clone(),
+            ),
             None => match self.exits.lock().unwrap().get_mut(&circuit_id) {
                 Some(exit) => (exit.encrypt_outgoing_cell(cell)?, exit.peer.clone()),
                 None => return Err(format!("unknown circuit {}", circuit_id)),
