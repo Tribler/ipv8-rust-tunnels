@@ -18,7 +18,7 @@ use tokio::{
 };
 
 use crate::{
-    packet::{as_data_cell, ip_to_circuit_id, wrap_cell},
+    packet::{as_data_cell, ip_to_circuit_id},
     payload::{self, Address},
     routing::{
         circuit::{Circuit, CircuitType},
@@ -207,9 +207,9 @@ impl Socks5Server {
         };
         debug!("Using circuit {} for HTTP request", cid);
 
-        // Create, encrypt and send the request.
+        // Create and send the request.
         let identifier: u32 = rand::rng().random();
-        let payload_data: Vec<u8> = payload::HTTPRequestPayload {
+        let payload = payload::HTTPRequestPayload {
             header: payload::Header {
                 prefix: self.settings.load().prefix.clone(),
                 msg_id: 28,
@@ -221,31 +221,11 @@ impl Socks5Server {
                 data_len: http_request.len() as u16,
                 data: http_request.to_vec(),
             },
-        }
-        .try_into()
-        .unwrap();
-
-        let cell = wrap_cell(&payload_data);
-
-        let (encrypted_cell, target) = match self.rt.circuits.lock().unwrap().get_mut(&cid) {
-            Some(circuit) => (
-                circuit.encrypt_outgoing_cell(cell, self.settings.load().max_relay_early)?,
-                circuit.peer.clone(),
-            ),
-            None => return Err(format!("Failed to encrypt http-request for {:?}", cid)),
         };
 
-        let _ = match self.rt.socket.send_to(&encrypted_cell, target).await {
-            Ok(bytes) => {
-                debug!("Sent http-request for {} for circuit {}", destination, cid);
-                self.rt
-                    .stats
-                    .lock()
-                    .unwrap()
-                    .add_up(&encrypted_cell, encrypted_cell.len());
-                Ok(bytes)
-            }
-            Err(e) => Err(format!("Failed to send http-response: {}", e)),
+        match self.rt.send_cell(cid, &payload).await {
+            Ok(_) => debug!("Sending http-request over circuit {}", cid),
+            Err(e) => return Err(format!("error sending http-request: {}", e)),
         };
 
         // Wait for a response

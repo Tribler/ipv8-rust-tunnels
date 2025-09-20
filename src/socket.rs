@@ -14,7 +14,6 @@ use tokio::runtime::Handle;
 use crate::crypto::Direction;
 use crate::packet::{
     decrypt_cell, encrypt_cell, has_prefix, has_prefixes, is_cell, swap_circuit_id, unwrap_cell,
-    wrap_cell,
 };
 use crate::payload::{
     self, Address, HTTPResponsePayload, Header, Raw, TestRequestPayload, TestResponsePayload, VarLenH,
@@ -407,7 +406,12 @@ impl TunnelSocket {
         }
     }
 
-    async fn on_test_request(&self, address: SocketAddr, circuit_id: u32, cell: &[u8]) -> Result<usize> {
+    async fn on_test_request(
+        &self,
+        _address: SocketAddr,
+        circuit_id: u32,
+        cell: &[u8],
+    ) -> Result<usize> {
         debug!("Got test-request from circuit {}", circuit_id);
         let mut cursor = std::io::Cursor::new(unwrap_cell(&cell.to_vec()));
         let mut reader = deku::reader::Reader::new(&mut cursor);
@@ -418,22 +422,17 @@ impl TunnelSocket {
 
         let mut random_data = vec![0; request.response_size.try_into().unwrap()];
         rand::rng().fill_bytes(&mut random_data);
-        match self
-            .send_cell(
+        let response = TestResponsePayload {
+            header: Header {
+                prefix: request.header.prefix,
+                msg_id: 22,
                 circuit_id,
-                &address,
-                &TestResponsePayload {
-                    header: Header {
-                        prefix: request.header.prefix,
-                        msg_id: 22,
-                        circuit_id,
-                    },
-                    identifier: request.identifier,
-                    response: Raw { data: random_data },
-                },
-            )
-            .await
-        {
+            },
+            identifier: request.identifier,
+            response: Raw { data: random_data },
+        };
+
+        match self.rt.send_cell(circuit_id, &response).await {
             Ok(bytes) => {
                 debug!("Sending test-response over circuit {}", circuit_id);
                 Ok(bytes)
@@ -463,7 +462,12 @@ impl TunnelSocket {
         Ok(cell.len())
     }
 
-    async fn on_http_request(&self, address: SocketAddr, circuit_id: u32, cell: &[u8]) -> Result<usize> {
+    async fn on_http_request(
+        &self,
+        _address: SocketAddr,
+        circuit_id: u32,
+        cell: &[u8],
+    ) -> Result<usize> {
         debug!("Got http-request from circuit {}", circuit_id);
         if !self.settings.load().peer_flags.contains(&PeerFlag::ExitHttp) {
             return Err(format!("dropping http-request, exiting HTTP is disabled"));
@@ -514,27 +518,22 @@ impl TunnelSocket {
 
         let num_cells = u16::div_ceil(tcp_response.len() as u16, 1400);
         for (index, chunk) in tcp_response.to_vec().chunks(1400).enumerate() {
-            match self
-                .send_cell(
+            let response = HTTPResponsePayload {
+                header: Header {
+                    prefix: cell[..22].to_vec(),
+                    msg_id: 29,
                     circuit_id,
-                    &address,
-                    &HTTPResponsePayload {
-                        header: Header {
-                            prefix: cell[..22].to_vec(),
-                            msg_id: 29,
-                            circuit_id,
-                        },
-                        identifier: request.identifier,
-                        part: index as u16,
-                        total: num_cells,
-                        response: VarLenH {
-                            data_len: chunk.len() as u16,
-                            data: chunk.to_vec(),
-                        },
-                    },
-                )
-                .await
-            {
+                },
+                identifier: request.identifier,
+                part: index as u16,
+                total: num_cells,
+                response: VarLenH {
+                    data_len: chunk.len() as u16,
+                    data: chunk.to_vec(),
+                },
+            };
+
+            match self.rt.send_cell(circuit_id, &response).await {
                 Ok(_) => debug!("Sending http-response ({}) over circuit {}", index + 1, circuit_id),
                 Err(e) => return Err(format!("error sending http-response: {}", e)),
             };
@@ -559,31 +558,5 @@ impl TunnelSocket {
             None => return Err(format!("unexpected http-response")),
         }
         Ok(cell.len())
-    }
-
-    async fn send_cell(
-        &self,
-        circuit_id: u32,
-        target: &impl tokio::net::ToSocketAddrs,
-        payload: &impl deku::DekuContainerWrite,
-    ) -> Result<usize> {
-        let payload_data = payload.to_bytes().unwrap();
-        let cell = wrap_cell(&payload_data);
-        let encrypted_cell = match self.rt.exits.lock().unwrap().get_mut(&circuit_id) {
-            Some(exit) => exit.encrypt_outgoing_cell(cell)?,
-            None => return Err(format!("unknown circuit")),
-        };
-
-        match self.rt.socket.send_to(&encrypted_cell, target).await {
-            Ok(bytes) => {
-                self.rt
-                    .stats
-                    .lock()
-                    .unwrap()
-                    .add_up(&encrypted_cell, encrypted_cell.len());
-                Ok(bytes)
-            }
-            Err(e) => Err(format!("{}", e)),
-        }
     }
 }

@@ -111,7 +111,7 @@ impl Endpoint {
             };
             info!("Tunnel socket listening on: {:?}", socket.local_addr().unwrap());
 
-            let rt = RoutingTable::new(socket);
+            let rt = RoutingTable::new(socket, settings.clone());
             rt_tx.send(rt.clone()).expect("Failed to send Tokio socket");
 
             let mut ts = TunnelSocket::new(rt, socks_servers, settings);

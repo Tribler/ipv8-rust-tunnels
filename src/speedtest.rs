@@ -10,7 +10,6 @@ use rand::{Rng, RngCore};
 use tokio::sync::broadcast;
 
 use crate::{
-    packet::wrap_cell,
     payload::{Header, Raw, TestRequestPayload},
     routing::table::RoutingTable,
     socket::TunnelSettings,
@@ -125,7 +124,7 @@ pub async fn send_loop(
         }
 
         let tid: u32 = rand::rng().random();
-        let test_request: Vec<u8> = TestRequestPayload {
+        let test_request = TestRequestPayload {
             header: Header {
                 prefix: prefix.to_vec(),
                 msg_id: 21,
@@ -136,31 +135,21 @@ pub async fn send_loop(
             request: Raw {
                 data: random_data[..request_size as usize].to_vec(),
             },
-        }
-        .try_into()
-        .unwrap();
+        };
 
-        let cell = wrap_cell(&test_request);
-        let (encrypted_cell, target) = match rt.circuits.lock().unwrap().get_mut(&circuit_id) {
-            Some(circuit) => {
-                let Ok(encrypted) = circuit.encrypt_outgoing_cell(cell, 8) else {
-                    error!("Can't encrypt cell for circuit {}", circuit_id);
-                    break;
-                };
-                (encrypted, circuit.peer.clone())
+        match rt.send_cell(circuit_id, &test_request).await {
+            Ok(n) => {
+                debug!("Sending test-request for circuit {}", circuit_id);
+                results
+                    .lock()
+                    .unwrap()
+                    .insert(tid, [get_time_ms() as usize, n, 0, 0]);
             }
-            None => {
-                error!("Can't find circuit {}", circuit_id);
+            Err(e) => {
+                error!("Can't send test-request for circuit {}: {}", circuit_id, e);
                 break;
             }
         };
-
-        if let Ok(n) = rt.socket.send_to(&encrypted_cell, target).await {
-            results
-                .lock()
-                .unwrap()
-                .insert(tid, [get_time_ms() as usize, n, 0, 0]);
-        }
     }
 }
 
