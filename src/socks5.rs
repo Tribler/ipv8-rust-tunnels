@@ -14,6 +14,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, UdpSocket},
+    time::timeout,
 };
 
 use crate::{
@@ -226,7 +227,7 @@ impl Socks5Server {
         // Wait for a response
         let prefix = "HTTPRequest".to_owned();
         let mut rx = self.rt.request_cache.add(prefix.clone(), identifier, 100);
-        let Ok(result) = tokio::time::timeout(Duration::new(5, 0), async {
+        let Ok(result) = timeout(Duration::new(5, 0), async {
             let mut parts: HashMap<u16, Vec<u8>> = HashMap::new();
             loop {
                 let Some(part) = rx.recv().await else {

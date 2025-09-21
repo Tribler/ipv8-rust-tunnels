@@ -36,6 +36,7 @@ mod socks5;
 mod speedtest;
 mod stats;
 mod util;
+
 #[macro_use]
 extern crate log;
 

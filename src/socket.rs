@@ -6,10 +6,12 @@ use pyo3::{PyObject, Python};
 use rand::RngCore;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ErrorKind};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::io::ErrorKind;
+use tokio::net::UdpSocket;
 use tokio::runtime::Handle;
+use tokio::time::timeout;
 
 use crate::crypto::Direction;
 use crate::packet::{
@@ -22,7 +24,7 @@ use crate::routing::circuit::CircuitType;
 use crate::routing::exit::{ExitSocket, PeerFlag};
 use crate::routing::table::RoutingTable;
 use crate::socks5::Socks5Server;
-use crate::util::Result;
+use crate::util::{send_tcp_request, Result};
 
 #[derive(Debug)]
 pub struct TunnelSettings {
@@ -470,66 +472,61 @@ impl TunnelSocket {
             Err(e) => return Err(format!("error while decoding http request: {}", e)),
         };
 
-        let stream_result = match request.target {
-            Address::V4(addr) => TcpStream::connect(addr).await,
-            Address::V6(addr) => TcpStream::connect(addr).await,
-            Address::DomainAddress((domain, port)) => {
-                TcpStream::connect((String::from_utf8_lossy(&domain).to_string(), port)).await
-            }
-        };
-        let Ok(mut stream) = stream_result else {
-            return Err(format!("error creating TCP stream"));
-        };
+        // Handling a HTTP request can take a while, so spawn a separate task.
+        let rt = self.rt.clone();
+        self.rt.settings.load().handle.spawn(async move {
+            let Ok(result) =
+                timeout(Duration::new(5, 0), send_tcp_request(&request.target, &request.request.data))
+                    .await
+            else {
+                warn!("TCP stream timed out");
+                return;
+            };
 
-        match stream.write_all(&request.request.data).await {
-            Err(e) => return Err(format!("error writing to TCP stream: {}", e)),
-            _ => {}
-        }
-
-        let mut reader = tokio::io::BufReader::new(stream);
-        let mut buf = [0; 1024 * 1024];
-        let tcp_response = match reader.read(&mut buf).await {
-            Ok(size) => &buf[..size],
-            Err(e) => return Err(format!("error reading from TCP stream: {}", e)),
-        };
-
-        if !tcp_response.starts_with("HTTP/1.1 307".as_bytes()) {
-            for i in 0..tcp_response.len() {
-                if tcp_response[i..].starts_with(b"\r\n\r\n") {
-                    if bdecode::bdecode(&tcp_response[i + 4..]).is_err() {
-                        return Err(format!(
-                            "TCP response is not bencoded ({})",
-                            String::from_utf8_lossy(&tcp_response[i + 4..])
-                        ));
-                    };
-                    break;
+            let (tcp_response, http_body) = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("TCP stream error: {}", e);
+                    return;
                 }
+            };
+            debug!("TCP response from {}: {}", request.target, String::from_utf8_lossy(&tcp_response));
+
+            if !tcp_response.starts_with(b"HTTP/1.1 307") {
+                if bdecode::bdecode(&http_body).is_err() {
+                    warn!("HTTP response from {} is not bencoded", request.target);
+                    return;
+                };
+                info!("HTTP response from {}", request.target);
             }
-        }
 
-        let num_cells = u16::div_ceil(tcp_response.len() as u16, 1400);
-        for (index, chunk) in tcp_response.to_vec().chunks(1400).enumerate() {
-            let response = HTTPResponsePayload {
-                header: Header {
-                    prefix: cell[..22].to_vec(),
-                    msg_id: 29,
-                    circuit_id,
-                },
-                identifier: request.identifier,
-                part: index as u16,
-                total: num_cells,
-                response: VarLenH {
-                    data_len: chunk.len() as u16,
-                    data: chunk.to_vec(),
-                },
-            };
+            let num_cells = u16::div_ceil(tcp_response.len() as u16, 1400);
+            for (index, chunk) in tcp_response.to_vec().chunks(1400).enumerate() {
+                let response = HTTPResponsePayload {
+                    header: Header {
+                        prefix: request.header.prefix.to_vec(),
+                        msg_id: 29,
+                        circuit_id,
+                    },
+                    identifier: request.identifier,
+                    part: index as u16,
+                    total: num_cells,
+                    response: VarLenH {
+                        data_len: chunk.len() as u16,
+                        data: chunk.to_vec(),
+                    },
+                };
 
-            match self.rt.send_cell(circuit_id, &response).await {
-                Ok(_) => debug!("Sending http-response ({}) over circuit {}", index + 1, circuit_id),
-                Err(e) => return Err(format!("error sending http-response: {}", e)),
-            };
-        }
-        Ok(tcp_response.len())
+                match rt.send_cell(circuit_id, &response).await {
+                    Ok(_) => debug!("Sending http-response ({}) over circuit {}", index + 1, circuit_id),
+                    Err(e) => {
+                        error!("Error sending http-response: {}", e);
+                        return;
+                    }
+                };
+            }
+        });
+        Ok(cell.len())
     }
 
     async fn on_http_response(
