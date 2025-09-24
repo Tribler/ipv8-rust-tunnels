@@ -195,7 +195,7 @@ impl TunnelSocket {
                         continue;
                     }
 
-                    for associate in server.associates.lock().unwrap().iter() {
+                    for associate in server.associates.lock().unwrap().values() {
                         if associate.socket.peer_addr().is_err() {
                             continue;
                         }

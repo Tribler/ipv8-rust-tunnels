@@ -32,7 +32,7 @@ use crate::{
 pub struct Socks5Server {
     pub rt: RoutingTable,
     pub hops: u8,
-    pub associates: Arc<Mutex<Vec<UDPAssociate>>>,
+    pub associates: Arc<Mutex<HashMap<SocketAddr, UDPAssociate>>>,
     pub local_addr: Option<SocketAddr>,
 }
 
@@ -41,7 +41,7 @@ impl Socks5Server {
         Self {
             rt,
             hops,
-            associates: Arc::new(Mutex::new(Vec::new())),
+            associates: Arc::new(Mutex::new(HashMap::new())),
             local_addr: None,
         }
     }
@@ -114,13 +114,17 @@ impl Socks5Server {
                 };
 
                 let mut associate = UDPAssociate::new(self.rt.clone(), self.hops, socket);
-                self.associates.lock().unwrap().push(associate.clone());
+                self.associates
+                    .lock()
+                    .unwrap()
+                    .insert(local_addr, associate.clone());
 
                 match associate.handle_associate().await {
                     Ok(()) => {}
                     Err(e) => error!("error while handling Socks5 connection: {}", e),
                 };
 
+                self.associates.lock().unwrap().remove(&local_addr);
                 let _ = conn.close().await;
             }
             Ok(Command::Bind(bind, _)) => {

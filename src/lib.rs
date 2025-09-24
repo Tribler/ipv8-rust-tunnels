@@ -175,7 +175,7 @@ impl Endpoint {
             if server.hops != hops {
                 continue;
             }
-            for associate in server.associates.lock().unwrap().iter() {
+            for associate in server.associates.lock().unwrap().values() {
                 // Set peer_addr for the Socks5 socket if it hasn't been set yet.
                 if associate.socket.peer_addr().is_err() {
                     let socket = associate.socket.clone();
@@ -243,7 +243,7 @@ impl Endpoint {
                 continue;
             }
 
-            for associate in server.associates.lock().unwrap().iter() {
+            for associate in server.associates.lock().unwrap().values() {
                 for (addr, cid) in associate.addr_to_cid.lock().unwrap().iter() {
                     if *cid == circuit_id {
                         let (host, port) = match addr {
