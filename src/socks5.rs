@@ -266,6 +266,7 @@ impl Socks5Server {
             return Err(format!("http-request {}:{} timed out", prefix, identifier));
         };
 
+        self.rt.request_cache.pop(prefix.clone(), identifier);
         let Ok(response) = result else {
             return Err(format!("error receiving http-response {}:{}", prefix, identifier));
         };
