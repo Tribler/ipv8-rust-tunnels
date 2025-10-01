@@ -472,6 +472,15 @@ impl TunnelSocket {
             Err(e) => return Err(format!("error while decoding http request: {}", e)),
         };
 
+        let permit_result = match self.rt.exits.lock().unwrap().get_mut(&circuit_id) {
+            Some(exit) => exit.http_requests.clone().try_acquire_owned(),
+            None => return Err(format!("dropping http-request, unknown exit")),
+        };
+        let permit = match permit_result {
+            Ok(permit) => permit,
+            Err(_) => return Err(format!("dropping http-request, request limit reached")),
+        };
+
         // Handling a HTTP request can take a while, so spawn a separate task.
         let rt = self.rt.clone();
         self.rt.settings.load().handle.spawn(async move {
@@ -525,6 +534,8 @@ impl TunnelSocket {
                     }
                 };
             }
+            // Ensure the permit gets moved into this task and dropped at the end.
+            drop(permit);
         });
         Ok(cell.len())
     }

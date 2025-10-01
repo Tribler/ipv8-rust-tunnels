@@ -5,7 +5,7 @@ use std::{
 };
 
 use deku::DekuReader;
-use tokio::{net::UdpSocket, task::JoinHandle};
+use tokio::{net::UdpSocket, sync::Semaphore, task::JoinHandle};
 
 use crate::{
     crypto::{Direction, SessionKeys},
@@ -37,6 +37,7 @@ pub struct ExitSocket {
     pub last_activity: u64,
     pub socket: Option<Arc<UdpSocket>>,
     pub handle: Option<JoinHandle<()>>,
+    pub http_requests: Arc<Semaphore>,
 }
 
 impl ExitSocket {
@@ -50,6 +51,7 @@ impl ExitSocket {
             last_activity: 0,
             socket: None,
             handle: None,
+            http_requests: Arc::new(Semaphore::new(5)),
         }
     }
 
