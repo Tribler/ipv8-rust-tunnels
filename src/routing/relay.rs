@@ -59,7 +59,7 @@ impl RelayRoute {
             return Err("Dropping cell (too many relay_early cells)".to_owned());
         }
 
-        self.relay_early_count += 1;
+        let _ = self.relay_early_count.saturating_add(1);
 
         let dec = match self.direction {
             Direction::Forward => decrypt_cell(packet, Direction::Forward, &self.keys)?,
