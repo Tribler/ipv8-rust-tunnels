@@ -13,6 +13,7 @@ use crate::{
     routing::{circuit::Circuit, exit::ExitSocket, relay::RelayRoute},
     socket::TunnelSettings,
     stats::Stats,
+    task_manager::TaskManager,
 };
 
 #[derive(Debug, Clone)]
@@ -23,11 +24,16 @@ pub struct RoutingTable {
     pub relays: Arc<Mutex<HashMap<u32, RelayRoute>>>,
     pub exits: Arc<Mutex<HashMap<u32, ExitSocket>>>,
     pub request_cache: RequestCache,
+    pub task_manager: TaskManager,
     pub settings: Arc<ArcSwap<TunnelSettings>>,
 }
 
 impl RoutingTable {
-    pub fn new(socket: Arc<UdpSocket>, settings: Arc<ArcSwap<TunnelSettings>>) -> Self {
+    pub fn new(
+        socket: Arc<UdpSocket>,
+        settings: Arc<ArcSwap<TunnelSettings>>,
+        task_manager: TaskManager,
+    ) -> Self {
         Self {
             socket,
             stats: Arc::new(Mutex::new(Stats::new())),
@@ -35,6 +41,7 @@ impl RoutingTable {
             relays: Arc::new(Mutex::new(HashMap::new())),
             exits: Arc::new(Mutex::new(HashMap::new())),
             request_cache: RequestCache::new(),
+            task_manager,
             settings,
         }
     }

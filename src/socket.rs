@@ -10,7 +10,6 @@ use std::time::Duration;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::io::ErrorKind;
 use tokio::net::UdpSocket;
-use tokio::runtime::Handle;
 use tokio::time::timeout;
 
 use crate::crypto::Direction;
@@ -35,12 +34,11 @@ pub struct TunnelSettings {
     pub exit_addr: SocketAddr,
     pub callback: PyObject,
     pub test_channel: tokio::sync::broadcast::Sender<(u32, usize)>,
-    pub handle: Handle,
     pub default_remotes: HashMap<u8, SocketAddr>,
 }
 
 impl TunnelSettings {
-    pub fn new(callback: PyObject, handle: Handle) -> Self {
+    pub fn new(callback: PyObject) -> Self {
         TunnelSettings {
             prefix: vec![0; 22],
             prefixes: vec![],
@@ -49,7 +47,6 @@ impl TunnelSettings {
             exit_addr: "[::]:0".parse().unwrap(),
             callback,
             test_channel: tokio::sync::broadcast::Sender::<(u32, usize)>::new(200),
-            handle,
             default_remotes: HashMap::new(),
         }
     }
@@ -63,7 +60,6 @@ impl TunnelSettings {
             exit_addr: settings.exit_addr.clone(),
             callback: settings.callback.clone_ref(py),
             test_channel: settings.test_channel.clone(),
-            handle: settings.handle.clone(),
             default_remotes: settings.default_remotes.clone(),
         }
     }
@@ -330,11 +326,10 @@ impl TunnelSocket {
                     return exit.socket.clone();
                 };
 
-                let guard = self.rt.settings.load();
-                exit.open_socket(guard.exit_addr.clone());
+                exit.open_socket(self.rt.settings.load().exit_addr.clone());
                 let circuit_id = exit.circuit_id.clone();
                 let rt = self.rt.clone();
-                let task = guard.handle.spawn(async move {
+                let task = rt.task_manager.clone().spawn("exit_socket", async move {
                     match ExitSocket::listen_forever(circuit_id, rt).await {
                         Ok(_) => {}
                         Err(e) => error!("Error for exit {}: {}", circuit_id, e),
@@ -483,7 +478,7 @@ impl TunnelSocket {
 
         // Handling a HTTP request can take a while, so spawn a separate task.
         let rt = self.rt.clone();
-        self.rt.settings.load().handle.spawn(async move {
+        self.rt.task_manager.spawn("http_request", async move {
             let Ok(result) =
                 timeout(Duration::new(5, 0), send_tcp_request(&request.target, &request.request.data))
                     .await

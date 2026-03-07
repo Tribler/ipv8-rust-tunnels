@@ -55,7 +55,7 @@ impl Socks5Server {
             // We're cloning this object and move it into a separate Tokio task.
             // All needed fields are in Arc<Mutex<>> anyway, so this should work.
             let mut this = self.clone();
-            tokio::spawn(async move {
+            self.rt.task_manager.spawn("socks5_connection", async move {
                 match this.handle_connection(conn).await {
                     Ok(()) => {}
                     Err(e) => error!("Socks5 server error: {}", e),

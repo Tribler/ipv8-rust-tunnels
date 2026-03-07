@@ -16,15 +16,15 @@ use std::sync::Mutex;
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
-    thread,
 };
 use tokio::net::TcpListener;
-use tokio::sync::oneshot::Sender;
+use tokio::runtime::Runtime;
 
 use crate::packet::is_cell;
 use crate::payload::Address;
 use crate::routing::table::RoutingTable;
 use crate::socks5::Socks5Server;
+use crate::task_manager::TaskManager;
 
 mod crypto;
 mod packet;
@@ -35,6 +35,7 @@ mod socket;
 mod socks5;
 mod speedtest;
 mod stats;
+mod task_manager;
 mod util;
 
 #[macro_use]
@@ -47,7 +48,7 @@ pub struct Endpoint {
     addr: String,
     rt: Option<RoutingTable>,
     socks_servers: Arc<Mutex<HashMap<SocketAddr, Socks5Server>>>,
-    tokio_shutdown: Option<Sender<()>>,
+    tokio_runtime: Option<Runtime>,
 }
 
 #[pymethods]
@@ -58,93 +59,91 @@ impl Endpoint {
             addr: format!("{}:{}", listen_addr, list_port),
             rt: None,
             socks_servers: Arc::new(Mutex::new(HashMap::new())),
-            tokio_shutdown: None,
+            tokio_runtime: None,
         }
     }
 
     fn open(&mut self, callback: PyObject, worker_threads: usize) -> PyResult<bool> {
         if self.rt.is_some() {
-            return Err(RustError::new_err("Endpoint is already open"));
+            warn!("Endpoint is already open");
+            return Ok(false);
         }
 
-        info!("Spawning Tokio thread");
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        let (handle_tx, handle_rx) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .worker_threads(worker_threads)
-                .build()
-                .unwrap();
-
-            handle_tx
-                .send(rt.handle().clone())
-                .expect("Failed to send Tokio runtime handle");
-
-            rt.block_on(async {
-                shutdown_rx.await.expect("Error on the shutdown channel");
-            });
-
-            rt.shutdown_background();
-            info!("Exiting Tokio thread");
-        });
-
-        let rt = handle_rx.recv().expect("Failed to get Tokio runtime handle");
-        self.tokio_shutdown = Some(shutdown_tx);
-
-        let settings = Arc::new(ArcSwap::from_pointee(TunnelSettings::new(callback, rt)));
-
-        info!("Spawning socket task");
-        let addr = self.addr.clone();
-        let socks_servers = self.socks_servers.clone();
-        let (rt_tx, rt_rx) = std::sync::mpsc::channel();
-        settings.load().handle.spawn(async move {
-            let Ok(socket_addr) = addr.parse() else {
-                error!("Failed to parse socket address");
-                return;
-            };
-            let Ok(socket) = util::create_socket_with_retry(socket_addr) else {
-                error!("Failed to create Tokio socket");
-                return;
-            };
-            info!("Tunnel socket listening on: {:?}", socket.local_addr().unwrap());
-
-            let rt = RoutingTable::new(socket, settings.clone());
-            rt_tx.send(rt.clone()).expect("Failed to send Tokio socket");
-
-            let mut ts = TunnelSocket::new(rt, socks_servers);
-            ts.listen_forever().await;
-        });
-        let Ok(rt) = rt_rx.recv() else {
-            error!("Failed to get routing table");
+        let Ok(socket_addr) = self.addr.parse::<SocketAddr>() else {
+            error!("Failed to parse socket address: {}", self.addr);
             return Ok(false);
         };
+
+        let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(worker_threads)
+            .build()
+        else {
+            error!("Failed to build Tokio runtime");
+            return Ok(false);
+        };
+
+        // Allow socket creation to find the Tokio reactor.
+        let _guard = runtime.enter();
+        let Ok(socket) = util::create_socket_with_retry(socket_addr) else {
+            error!("Failed to create Tokio socket on {:?}", socket_addr);
+            return Ok(false);
+        };
+
+        let local_addr = socket.local_addr().unwrap();
+        info!("Tunnel socket listening on: {:?}", local_addr);
+
+        let settings = Arc::new(ArcSwap::from_pointee(TunnelSettings::new(callback)));
+        let manager = TaskManager::new(runtime.handle().clone());
+        let rt = RoutingTable::new(socket, settings, manager.clone());
+
+        info!("Spawning socket task");
+        let socks_servers = self.socks_servers.clone();
+        let cloned_rt = rt.clone();
+        manager.spawn("tunnel_socket", async move {
+            let mut ts = TunnelSocket::new(cloned_rt, socks_servers);
+            ts.listen_forever().await;
+        });
+
         self.rt = Some(rt);
+        self.tokio_runtime = Some(runtime);
+
         Ok(true)
     }
 
-    fn close(&mut self) -> PyResult<()> {
+    fn close(&mut self, py: Python, timeout_secs: u64) -> PyResult<()> {
         info!("Shutting down rust endpoint");
 
-        if let Some(shutdown) = self.tokio_shutdown.take() {
-            if let Err(e) = shutdown.send(()) {
-                error!("Unable to shutdown Tokio thread: {:?}", e);
-            }
+        if let Some(rt) = self.rt.take() {
+            let manager = rt.task_manager.clone();
+            let handle = manager.handle.clone();
+
+            // Release GIL to allow Python to process other tasks.
+            py.allow_threads(move || {
+                handle.block_on(async move {
+                    manager.shutdown(timeout_secs).await;
+                });
+            });
         }
-        self.tokio_shutdown = None;
-        self.rt = None;
+
+        self.socks_servers.lock().unwrap().clear();
+
+        if let Some(runtime) = self.tokio_runtime.take() {
+            runtime.shutdown_background();
+            info!("Tokio shutdown called");
+        }
 
         Ok(())
     }
 
     fn create_socks5_server(&mut self, port: u16, hops: u8) -> PyResult<u16> {
         let rt = self.get_routing_table()?;
+        let rt = rt.clone();
         let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
         let socks_servers = self.socks_servers.clone();
-        let rt = rt.clone();
         let (addr_tx, addr_rx) = std::sync::mpsc::channel();
 
-        rt.settings.load().handle.spawn(async move {
+        rt.task_manager.clone().spawn("socks5_server", async move {
             let listener = match TcpListener::bind(addr).await {
                 Ok(listener) => listener,
                 Err(e) => {
@@ -179,7 +178,7 @@ impl Endpoint {
                 // Set peer_addr for the Socks5 socket if it hasn't been set yet.
                 if associate.socket.peer_addr().is_err() {
                     let socket = associate.socket.clone();
-                    rt.settings.load().handle.spawn(async move {
+                    rt.task_manager.spawn("associate_connect", async move {
                         let _ = socket.connect(socket_addr).await;
                     });
                 }
@@ -214,16 +213,19 @@ impl Endpoint {
         callback_interval: u16,
     ) -> PyResult<()> {
         let rt = self.get_routing_table()?;
-        rt.settings.load().handle.spawn(speedtest::run_test(
-            circuit_id,
-            rt.clone(),
-            test_time,
-            request_size,
-            response_size,
-            target_rtt,
-            callback,
-            callback_interval,
-        ));
+        rt.task_manager.spawn(
+            "speedtest",
+            speedtest::run_test(
+                circuit_id,
+                rt.clone(),
+                test_time,
+                request_size,
+                response_size,
+                target_rtt,
+                callback,
+                callback_interval,
+            ),
+        );
         Ok(())
     }
 
@@ -577,7 +579,7 @@ impl Endpoint {
                 // The socket is busy, so we'll retry on the Tokio thread and await it.
                 let cloned_socket = rt.socket.clone();
                 let cloned_stats = rt.stats.clone();
-                rt.settings.load().handle.spawn(async move {
+                rt.task_manager.spawn("send_to", async move {
                     match cloned_socket.send_to(&packet, address).await {
                         Ok(_) => cloned_stats.lock().unwrap().add_up(&packet, packet.len()),
                         Err(e) => error!("Could not send packet to {}: {}", address, e.to_string()),

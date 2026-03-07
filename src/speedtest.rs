@@ -29,31 +29,32 @@ pub async fn run_test(
 
     let mut cb_task = None;
     if callback_interval > 0 {
-        cb_task = Some(rt.settings.load().handle.spawn(cb_loop(
-            Python::with_gil(|py| callback.clone_ref(py)),
-            callback_interval,
-            results.clone(),
-        )));
+        cb_task = Some(rt.task_manager.spawn(
+            "speedtest_cb",
+            cb_loop(Python::with_gil(|py| callback.clone_ref(py)), callback_interval, results.clone()),
+        ));
     }
 
-    let recv_task = rt.settings.load().handle.spawn(receive_loop(
-        rt.settings.load().test_channel.clone(),
-        results.clone(),
-        rtts.clone(),
-    ));
+    let recv_task = rt.task_manager.spawn(
+        "speedtest_recv",
+        receive_loop(rt.settings.load().test_channel.clone(), results.clone(), rtts.clone()),
+    );
 
     debug!("Testing circuit {}..", circuit_id);
     let prefix = rt.settings.load().prefix.clone();
-    let send_task = rt.settings.load().handle.spawn(send_loop(
-        circuit_id,
-        prefix,
-        rt.clone(),
-        request_size,
-        response_size,
-        target_rtt,
-        results.clone(),
-        rtts.clone(),
-    ));
+    let send_task = rt.task_manager.spawn(
+        "speedtest_send",
+        send_loop(
+            circuit_id,
+            prefix,
+            rt.clone(),
+            request_size,
+            response_size,
+            target_rtt,
+            results.clone(),
+            rtts.clone(),
+        ),
+    );
 
     debug!("Stopping test for circuit {}..", circuit_id);
     tokio::time::sleep(Duration::from_millis((test_time).into())).await;

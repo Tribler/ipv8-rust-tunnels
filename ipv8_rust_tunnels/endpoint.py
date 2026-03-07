@@ -224,16 +224,14 @@ class RustEndpoint(CryptoEndpoint, Endpoint, TaskManager):
         self.apply_settings()
         return succeed(self.rust_ep.is_open())
 
-    async def close(self) -> None:
+    async def close(self, grace_period: int = 5) -> None:
         """
         Closes the Endpoint.
         """
         await self.shutdown_task_manager()
 
-        if not self.is_open():
-            return
-
-        self.rust_ep.close()
+        if self.is_open():
+            return await asyncio.to_thread(self.rust_ep.close, grace_period)
 
     def assert_open(self) -> None:
         """

@@ -17,7 +17,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.23.4", features = ["extension-module"] }
-tokio = { version = "1.43.0", features = ["full"] }
+tokio = { version = "1.43.0", features = ["full", "tracing"] }
+tokio-util = { version = "0.7.18", features = ["full"] }
 env_logger = "0.11.6"
 log = "0.4.25"
 arc-swap = "1.7.1"
