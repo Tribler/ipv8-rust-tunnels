@@ -92,12 +92,7 @@ pub fn is_cell(prefix: &Vec<u8>, packet: &[u8]) -> bool {
 }
 
 pub fn has_prefix(prefix: &[u8], packet: &[u8]) -> bool {
-    for i in 0..prefix.len() {
-        if packet[i] != prefix[i] {
-            return false;
-        }
-    }
-    true
+    packet.starts_with(prefix)
 }
 
 pub fn has_prefixes(prefixes: &Vec<Vec<u8>>, packet: &[u8]) -> bool {
