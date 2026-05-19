@@ -1,4 +1,13 @@
-[build]
+[target.x86_64-pc-windows-msvc]
 rustflags = [
-    "--cfg", "tokio_unstable"
+    "--cfg", "tokio_unstable",
+    "-C", "target-feature=+crt-static",
+    "-l", "dylib=bcrypt",
+    "-l", "dylib=user32",
+    "-l", "dylib=ole32",
+    "-l", "dylib=strmiids",
+    "-l", "dylib=shlwapi",
+    "-l", "dylib=secur32",
+    "-l", "dylib=mfplat",
+    "-l", "dylib=mfuuid",
 ]

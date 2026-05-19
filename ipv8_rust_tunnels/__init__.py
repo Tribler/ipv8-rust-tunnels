@@ -12,8 +12,15 @@ from ._rust import (
     generate_safe_prime,
     generate_session_keys,
     is_prime,
-    EndpointNotOpenError,
     InvalidAddressError,
+    NotOpenError,
+    TunnelEngine,
+    TunnelSettings,
+    PEER_FLAG_RELAY,
+    PEER_FLAG_EXIT_BT,
+    PEER_FLAG_EXIT_IPV8,
+    PEER_FLAG_SPEED_TEST,
+    PEER_FLAG_EXIT_HTTP
 )
 
 if TYPE_CHECKING:
@@ -32,6 +39,8 @@ def __getattr__(name: str):
 __all__ = [
     "__version__",
     "Endpoint",
+    "TunnelEngine",
+    "TunnelSettings",
     "PrivateKey",
     "PublicKey",
     "SessionKeys",
@@ -42,6 +51,11 @@ __all__ = [
     "generate_safe_prime",
     "generate_session_keys",
     "is_prime",
-    "EndpointNotOpenError",
+    "NotOpenError",
     "InvalidAddressError",
+    "PEER_FLAG_RELAY",
+    "PEER_FLAG_EXIT_BT",
+    "PEER_FLAG_EXIT_IPV8",
+    "PEER_FLAG_SPEED_TEST",
+    "PEER_FLAG_EXIT_HTTP",
 ]

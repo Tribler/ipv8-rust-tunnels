@@ -5,29 +5,67 @@ edition = "2021"
 
 [profile.release]
 opt-level = 3
-strip = true
-debug = false
+strip = "debuginfo"
+debug = "line-tables-only"
 codegen-units = 1
 lto = true
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "_rust"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[[test]]
+name = "transport"
+path = "tests/transport.rs"
+
+[profile.bench]
+inherits = "release"
+
+[[bench]]
+name = "transport"
+path = "benches/transport.rs"
+harness = false
+
+[[bench]]
+name = "processing"
+path = "benches/processing.rs"
+harness = false
+
+[[bench]]
+name = "speedtest"
+path = "benches/speedtest.rs"
+harness = false
+
+[[bench]]
+name = "production"
+path = "benches/production.rs"
+harness = false
+
+[[bench]]
+name = "hidden_services"
+path = "benches/hidden_services.rs"
+harness = false
 
 [dependencies]
-pyo3 = { version = "0.29.0", features = ["extension-module", "multiple-pymethods"] }
 tokio = { version = "1.43.0", features = ["full", "tracing"] }
 tokio-util = { version = "0.7.18", features = ["full"] }
-env_logger = "0.11.6"
-log = "0.4.25"
 arc-swap = "1.7.1"
-chacha20poly1305 = "0.10.1"
 socks5-proto = "0.4.1"
 socks5-server = "0.10.1"
-bytes = "1.10.0"
-rand = "0.9.0"
-map-macro = "0.3.0"
+rand = "0.10.2"
 bdecode = "=0.1.0"
 deku = "0.19"
 openssl = { version = "0.10", features = ["vendored"] }
+flume = "0.12.0"
+dashmap = "6.2.1"
+bencode = "0.1.16"
+
+tracing = { version = "0.1", features = ["std"] }
+console-subscriber = "0.5.0"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "fmt"] }
+
+pyo3 = { version = "0.23.5", features = ["multiple-pymethods"], optional = true }
+
+[features]
+default = ["python-extension"]
+python-extension = ["dep:pyo3", "pyo3/extension-module"]
