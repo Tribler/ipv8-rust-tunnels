@@ -100,7 +100,7 @@ impl Rendezvous {
     }
 }
 
-#[pyclass(get_all)]
+#[pyclass(get_all, from_py_object)]
 #[derive(Clone)]
 pub struct PyRendezvousStats {
     pub circuit_id_dl: u32,

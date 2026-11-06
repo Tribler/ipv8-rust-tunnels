@@ -17,7 +17,7 @@ use crate::peer::Peer;
 use crate::transport::stats::AtomicStat;
 use crate::util::{self, Future};
 
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum CircuitType {
     Data,
@@ -33,7 +33,7 @@ impl fmt::Display for CircuitType {
     }
 }
 
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
     Ready,
@@ -252,7 +252,7 @@ impl Circuit {
     }
 }
 
-#[pyclass(get_all)]
+#[pyclass(get_all, from_py_object)]
 #[derive(Clone)]
 pub struct PyHopStats {
     pub address: String,
@@ -262,7 +262,7 @@ pub struct PyHopStats {
     pub flags: Vec<u16>,
 }
 
-#[pyclass(get_all)]
+#[pyclass(get_all, from_py_object)]
 #[derive(Clone)]
 pub struct PyCircuitStats {
     pub circuit_id: u32,

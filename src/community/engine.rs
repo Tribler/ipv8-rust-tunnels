@@ -174,7 +174,7 @@ impl PyTunnelEngine {
         Ok(())
     }
 
-    pub fn get_associated_circuits(&self, port: u16, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn get_associated_circuits(&self, port: u16, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let rt = self.get_rt()?;
         let mut circuit_ids = Vec::new();
 
@@ -190,7 +190,7 @@ impl PyTunnelEngine {
         Ok(PyTuple::new(py, circuit_ids)?.into_any().unbind())
     }
 
-    pub fn get_peers_for_circuit(&self, circuit_id: u32, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn get_peers_for_circuit(&self, circuit_id: u32, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let rt = self.get_rt()?;
         let mut result = Vec::new();
 
@@ -236,7 +236,7 @@ impl PyTunnelEngine {
         Ok(())
     }
 
-    pub fn get_socks5_statistics(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn get_socks5_statistics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let mut result = Vec::new();
         for (addr, server) in self.socks_servers.load().iter() {
             let item = PyDict::new(py);
@@ -249,7 +249,7 @@ impl PyTunnelEngine {
     }
 
     #[pyo3(signature = ())]
-    pub fn get_tunnel_statistics(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn get_tunnel_statistics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let result = PyDict::new(py);
         let rt = self.get_rt()?;
         let tunnels = self.get_community()?;
@@ -402,7 +402,7 @@ impl PyTunnelEngine {
         let community = self.get_community()?;
         let cache = &community.peer_cache;
 
-        let py_dict = py_candidates.downcast::<PyDict>()?;
+        let py_dict = py_candidates.cast::<PyDict>()?;
         let mut new_entries = Vec::with_capacity(py_dict.len());
 
         let now =
@@ -421,7 +421,7 @@ impl PyTunnelEngine {
             let pub_key_bytes: Vec<u8> = pub_key_obj.call_method0("key_to_bin")?.extract()?;
             let public_key = PublicKey::from_bytes(&pub_key_bytes)
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-            let raw_flags = raw_flags_obj.downcast::<PyList>()?.extract::<Vec<u16>>()?;
+            let raw_flags = raw_flags_obj.cast::<PyList>()?.extract::<Vec<u16>>()?;
 
             let mut flags = HashSet::new();
             for f in raw_flags {
@@ -459,7 +459,7 @@ impl PyTunnelEngine {
         request_size: u16,
         response_size: u16,
         target_rrt: u16,
-        callback: PyObject,
+        callback: Py<PyAny>,
         callback_interval: u16,
     ) -> PyResult<()> {
         let rt = self.get_rt()?;

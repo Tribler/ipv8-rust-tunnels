@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pyo3::PyObject;
+use pyo3::{Py, PyAny};
 
 use crate::community::Community;
 use crate::task_manager::TaskManager;
@@ -28,7 +28,7 @@ pub struct WorkerPool {
 }
 
 impl WorkerPool {
-    pub fn start(manager: &TaskManager, num_workers: usize, callback: Option<PyObject>) -> Self {
+    pub fn start(manager: &TaskManager, num_workers: usize, callback: Option<Py<PyAny>>) -> Self {
         let rust_processed_count = Arc::new(AtomicUsize::new(0));
         let python_processed_count = Arc::new(AtomicUsize::new(0));
 
@@ -66,7 +66,7 @@ impl WorkerPool {
                                 let ip_str = payload.src_addr.ip().to_string();
                                 let port_num = payload.src_addr.port();
 
-                                pyo3::Python::with_gil(|py| {
+                                pyo3::Python::attach(|py| {
                                     let py_bytes = pyo3::types::PyBytes::new(py, &payload.packet);
                                     if let Err(e) = cb.call1(py, ((ip_str, port_num), py_bytes)) {
                                         error!("Couldn't call Python callback: {}", e);

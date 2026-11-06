@@ -340,7 +340,7 @@ impl std::hash::Hash for PrivateKey {
     }
 }
 
-#[pyclass(name = "PublicKey")]
+#[pyclass(name = "PublicKey", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyPublicKey {
     pub core: PublicKey,
@@ -383,7 +383,7 @@ impl PyPublicKey {
     }
 }
 
-#[pyclass(name = "PrivateKey")]
+#[pyclass(name = "PrivateKey", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyPrivateKey {
     pub core: PrivateKey,
@@ -439,7 +439,7 @@ impl PyPrivateKey {
 }
 
 #[pyfunction]
-pub fn generate_safe_prime(py: Python<'_>, bit_length: i32) -> PyResult<PyObject> {
+pub fn generate_safe_prime(py: Python<'_>, bit_length: i32) -> PyResult<Py<PyAny>> {
     let mut prime = BigNum::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
     prime
@@ -450,7 +450,7 @@ pub fn generate_safe_prime(py: Python<'_>, bit_length: i32) -> PyResult<PyObject
 }
 
 #[pyfunction]
-pub fn generate_rsa_prime(py: Python<'_>, bit_length: u32) -> PyResult<PyObject> {
+pub fn generate_rsa_prime(py: Python<'_>, bit_length: u32) -> PyResult<Py<PyAny>> {
     let rsa =
         openssl::rsa::Rsa::generate(bit_length * 2).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 

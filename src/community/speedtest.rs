@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use pyo3::types::{IntoPyDict, PyDictMethods};
-use pyo3::{PyObject, Python};
+use pyo3::{Py, PyAny, Python};
 use rand::{Rng, RngExt};
 
 use crate::community::routing::table::RoutingTable;
@@ -62,7 +62,7 @@ pub async fn run_test(
     request_size: u16,
     response_size: u16,
     target_rtt: u16,
-    callback: PyObject,
+    callback: Py<PyAny>,
     callback_interval: u16,
     stats: Arc<Stats>,
 ) {
@@ -76,7 +76,7 @@ pub async fn run_test(
     let mut tasks = Vec::with_capacity(5);
 
     if callback_interval > 0 {
-        let cb = Python::with_gil(|py| callback.clone_ref(py));
+        let cb = Python::attach(|py| callback.clone_ref(py));
         let stats_clone = stats.clone();
         tasks.push(rt.task_manager.spawn("speedtest_cb", async move {
             loop {
@@ -87,14 +87,14 @@ pub async fn run_test(
                 let current_down =
                     stats_clone.socket_stats.bytes_down.load(Ordering::Relaxed) as usize - start_down;
 
-                let py_dict: PyObject = Python::with_gil(|py| {
+                let py_dict: Py<PyAny> = Python::attach(|py| {
                     let dict = pyo3::types::PyDict::new(py);
                     dict.set_item("bytes_sent", current_up).unwrap();
                     dict.set_item("bytes_received", current_down).unwrap();
                     dict.set_item("elapsed_ms", elapsed_ms).unwrap();
                     dict.into()
                 });
-                let _ = Python::with_gil(|py| cb.call1(py, (py_dict, false)));
+                let _ = Python::attach(|py| cb.call1(py, (py_dict, false)));
             }
         }));
     }
@@ -165,7 +165,7 @@ pub async fn run_test(
 
     tokio::time::sleep(Duration::from_millis((target_rtt * 2).into())).await;
 
-    let py_dict: PyObject = Python::with_gil(|py| {
+    let py_dict: Py<PyAny> = Python::attach(|py| {
         let mut map = HashMap::new();
         let elapsed = anchor.elapsed().as_millis() as usize;
         let up = stats.socket_stats.bytes_up.load(Ordering::Relaxed) as usize - start_up;
@@ -176,6 +176,6 @@ pub async fn run_test(
         map.into_py_dict(py).unwrap().into()
     });
 
-    let _ = Python::with_gil(|py| callback.call1(py, (py_dict, true)));
+    let _ = Python::attach(|py| callback.call1(py, (py_dict, true)));
     info!("Finished test for circuit {}", circuit_id);
 }

@@ -44,7 +44,7 @@ impl EndpointSettings {
     }
 }
 
-#[pyclass(name = "EndpointSettings", get_all, set_all)]
+#[pyclass(name = "EndpointSettings", get_all, set_all, from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyEndpointSettings {
     pub prefixes: Vec<Vec<u8>>,

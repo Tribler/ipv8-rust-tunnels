@@ -49,7 +49,7 @@ impl Endpoint {
         }
     }
 
-    pub fn open(&mut self, callback: PyObject) -> PyResult<bool> {
+    pub fn open(&mut self, callback: Py<PyAny>) -> PyResult<bool> {
         if self.tokio_runtime.is_some() {
             warn!("Endpoint is already open");
             return Ok(false);
@@ -179,7 +179,7 @@ impl Endpoint {
                 let handle = manager.handle.clone();
 
                 // Release GIL to allow Python to process other tasks.
-                py.allow_threads(move || {
+                py.detach(move || {
                     handle.block_on(async move {
                         manager.shutdown(timeout_secs).await;
                     });
@@ -201,7 +201,7 @@ impl Endpoint {
         self.tokio_runtime.is_some()
     }
 
-    pub fn get_address(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn get_address(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let Some(listener) = &self.listener else {
             return Err(NotOpenError::new_err("Endpoint is not open"));
         };
@@ -221,7 +221,7 @@ impl Endpoint {
         self.settings.store(Arc::new(new_settings));
     }
 
-    pub fn get_socket_statistics(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn get_socket_statistics(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let Some(listener) = &self.listener else {
             return Err(NotOpenError::new_err("Endpoint is not open"));
         };
@@ -233,7 +233,7 @@ impl Endpoint {
         &mut self,
         prefix: &Bound<'_, PyBytes>,
         py: Python<'_>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let Some(listener) = &self.listener else {
             return Err(NotOpenError::new_err("Endpoint is not open"));
         };

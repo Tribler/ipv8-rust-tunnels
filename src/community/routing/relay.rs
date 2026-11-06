@@ -113,7 +113,7 @@ impl Relay {
     }
 }
 
-#[pyclass(get_all)]
+#[pyclass(get_all, from_py_object)]
 #[derive(Clone)]
 pub struct PyRelayStats {
     pub circuit_id_fw: u32,

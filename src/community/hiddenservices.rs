@@ -9,7 +9,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use bencode::{Bencode, FromBencode, ToBencode};
 use dashmap::DashMap;
 use deku::{DekuContainerRead, DekuContainerWrite};
-use pyo3::{pyclass, PyObject};
+use pyo3::{pyclass, Py, PyAny};
 use rand::seq::IndexedRandom;
 use tokio::sync::oneshot;
 
@@ -159,14 +159,14 @@ impl FromBencode for IntroductionPoint {
 pub enum E2ECallback {
     // E2ECallback can be Rust or Python
     Rust(Arc<dyn Fn([u8; 20], std::net::IpAddr, u16) -> std::result::Result<(), String> + Send + Sync>),
-    Python(PyObject),
+    Python(Py<PyAny>),
 }
 
 impl Clone for E2ECallback {
     fn clone(&self) -> Self {
         match self {
             E2ECallback::Rust(f) => E2ECallback::Rust(Arc::clone(f)),
-            E2ECallback::Python(p) => pyo3::Python::with_gil(|py| E2ECallback::Python(p.clone_ref(py))),
+            E2ECallback::Python(p) => pyo3::Python::attach(|py| E2ECallback::Python(p.clone_ref(py))),
         }
     }
 }
@@ -203,7 +203,7 @@ pub struct HiddenServiceState {
 }
 
 impl HiddenServiceState {
-    pub fn new(e2e_callback: Option<PyObject>) -> Self {
+    pub fn new(e2e_callback: Option<Py<PyAny>>) -> Self {
         let cb = e2e_callback.map(|obj| Arc::new(E2ECallback::Python(obj)));
         Self {
             swarms: ArcSwap::new(Arc::new(HashMap::new())),
@@ -255,7 +255,7 @@ impl HiddenServiceState {
 
         match callback.as_ref() {
             E2ECallback::Rust(rust_fn) => rust_fn(*infohash, virtual_ip, port),
-            E2ECallback::Python(py_fn) => pyo3::Python::with_gil(|py| {
+            E2ECallback::Python(py_fn) => pyo3::Python::attach(|py| {
                 let py_infohash = pyo3::types::PyBytes::new(py, infohash);
                 let py_addr = (virtual_ip.to_string(), port);
 
@@ -1337,7 +1337,7 @@ impl TunnelCommunity {
     }
 }
 
-#[pyclass(get_all)]
+#[pyclass(get_all, from_py_object)]
 #[derive(Clone)]
 pub struct PySwarm {
     pub info_hash: [u8; 20],

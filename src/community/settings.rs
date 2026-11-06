@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
-use pyo3::pyclass;
 use pyo3::pymethods;
 use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods};
-use pyo3::{Bound, PyObject, PyResult, Python};
+use pyo3::{pyclass, Py, PyAny};
+use pyo3::{Bound, PyResult, Python};
 
 use crate::community::routing::peer::PeerFlag;
 use crate::InvalidAddressError;
@@ -63,7 +63,7 @@ impl TunnelSettings {
     }
 }
 
-#[pyclass(name = "TunnelSettings")]
+#[pyclass(name = "TunnelSettings", from_py_object)]
 #[derive(Clone)]
 pub struct PyTunnelSettings {
     #[pyo3(get, set)]
@@ -158,7 +158,7 @@ impl PyTunnelSettings {
     }
 
     #[getter]
-    pub fn default_remotes(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn default_remotes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         for (&hops, addr) in &self.default_remotes {
             dict.set_item(hops, addr.to_string())?;

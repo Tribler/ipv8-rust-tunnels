@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         target: [x86_64, x86, aarch64, armv7, s390x, ppc64le]
@@ -21,27 +21,165 @@ jobs:
             libc: musllinux
           - target: ppc64le
             libc: musllinux
+        include:
+          - target: x86_64
+            libc: manylinux
+            clang_args: 'BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_gnu = "-I/opt/ffmpeg_build/include"'
+          - target: x86_64
+            libc: musllinux
+            clang_args: 'BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl = "-I/opt/ffmpeg_build/include"'
+          - target: x86
+            libc: manylinux
+            clang_args: 'BINDGEN_EXTRA_CLANG_ARGS_i686_unknown_linux_gnu = "-target i686-linux-gnu -m32 -DAVUTIL_HWCONTEXT_VULKAN_H -DVULKAN_H_ -I/opt/ffmpeg_build/include"'
+          - target: x86
+            libc: musllinux
+            clang_args: 'BINDGEN_EXTRA_CLANG_ARGS_i686_unknown_linux_musl = "-target i686-linux-musl -m32 --sysroot=/usr/local/musl/i686-unknown-linux-musl -DAVUTIL_HWCONTEXT_VULKAN_H -DVULKAN_H_ -I/opt/ffmpeg_build/include"'
+          - target: aarch64
+            libc: manylinux
+            clang_args: 'BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu = "-target aarch64-linux-gnu --sysroot=/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot -DAVUTIL_HWCONTEXT_VULKAN_H -DVULKAN_H_ -I/opt/ffmpeg_build/include"'
+          - target: aarch64
+            libc: musllinux
+            clang_args: 'BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_musl = "-target aarch64-linux-musl --sysroot=/usr/local/musl/aarch64-unknown-linux-musl -I/opt/ffmpeg_build/include"'
+          - target: armv7
+            libc: manylinux
+            clang_args: 'BINDGEN_EXTRA_CLANG_ARGS_armv7_unknown_linux_gnueabihf = "-target arm-linux-gnueabihf --sysroot=/usr/armv7-unknown-linux-gnueabihf/armv7-unknown-linux-gnueabihf/sysroot -DAVUTIL_HWCONTEXT_VULKAN_H -DVULKAN_H_ -I/opt/ffmpeg_build/include"'
+          - target: armv7
+            libc: musllinux
+            clang_args: 'BINDGEN_EXTRA_CLANG_ARGS_armv7_unknown_linux_musleabihf = "-target arm-linux-musleabihf --sysroot=/usr/local/musl/armv7-unknown-linux-musleabihf -DAVUTIL_HWCONTEXT_VULKAN_H -DVULKAN_H_ -I/opt/ffmpeg_build/include"'
+          - target: s390x
+            libc: manylinux
+            clang_args: 'BINDGEN_EXTRA_CLANG_ARGS_s390x_unknown_linux_gnu = "-target s390x-ibm-linux-gnu --sysroot=/usr/s390x-ibm-linux-gnu/s390x-ibm-linux-gnu/sysroot -I/opt/ffmpeg_build/include"'
+          - target: ppc64le
+            libc: manylinux
+            clang_args: 'BINDGEN_EXTRA_CLANG_ARGS_powerpc64le_unknown_linux_gnu = "-target powerpc64le-unknown-linux-gnu --sysroot=/usr/powerpc64le-unknown-linux-gnu/powerpc64le-unknown-linux-gnu/sysroot -I/opt/ffmpeg_build/include"'
+
     steps:
       - uses: actions/checkout@v3
       - uses: ./.github/actions/set-version
       - uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.11'
+      - name: Compile ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm pkg-config diffutils make git libssl-dev gcc-multilib g++-multilib
+
+          CONF_FLAGS=""
+          VPX_TARGET="x86_64-linux-gcc"
+          
+          if [ "${{ matrix.target }}" = "aarch64" ]; then
+              sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+              CONF_FLAGS="--enable-cross-compile --cross-prefix=aarch64-linux-gnu- --arch=aarch64 --target-os=linux"
+              VPX_TARGET="arm64-linux-gcc"
+              export CC=aarch64-linux-gnu-gcc
+              export CXX=aarch64-linux-gnu-g++
+          elif [ "${{ matrix.target }}" = "armv7" ]; then
+              sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+              CONF_FLAGS="--enable-cross-compile --cross-prefix=arm-linux-gnueabihf- --arch=armv7 --target-os=linux"
+              VPX_TARGET="armv7-linux-gcc"
+              export CC=arm-linux-gnueabihf-gcc
+              export CXX=arm-linux-gnueabihf-g++
+              export AS=arm-linux-gnueabihf-gcc
+              export ASFLAGS="-c"
+          elif [ "${{ matrix.target }}" = "s390x" ]; then
+              sudo apt-get install -y gcc-s390x-linux-gnu g++-s390x-linux-gnu
+              CONF_FLAGS="--enable-cross-compile --cross-prefix=s390x-linux-gnu- --arch=s390x --target-os=linux"
+              VPX_TARGET="generic-gnu"
+              export CC=s390x-linux-gnu-gcc
+              export CXX=s390x-linux-gnu-g++
+          elif [ "${{ matrix.target }}" = "ppc64le" ]; then
+              sudo apt-get install -y gcc-powerpc64le-linux-gnu g++-powerpc64le-linux-gnu
+              CONF_FLAGS="--enable-cross-compile --cross-prefix=powerpc64le-linux-gnu- --arch=ppc64le --target-os=linux"
+              VPX_TARGET="ppc64le-linux-gcc"
+              export CC=powerpc64le-linux-gnu-gcc
+              export CXX=powerpc64le-linux-gnu-g++
+          elif [ "${{ matrix.target }}" = "x86" ]; then
+              sudo apt-get install -y gcc-i686-linux-gnu g++-i686-linux-gnu libc6-dev-i386-cross
+              sudo ln -sf /usr/include/i386-linux-gnu/asm /usr/include/asm
+              CONF_FLAGS="--enable-cross-compile --cross-prefix=i686-linux-gnu- --arch=i686 --target-os=linux --extra-cflags=-fno-stack-protector"
+              VPX_TARGET="x86-linux-gcc"
+              export CC=i686-linux-gnu-gcc
+              export CXX=i686-linux-gnu-g++
+              export CFLAGS="-m32"
+              export CXXFLAGS="-m32"
+          fi
+
+          export PKG_CONFIG_PATH="/home/runner/ffmpeg_build/lib/pkgconfig"
+
+          # Build zlib
+          git clone --branch v1.3.1 --depth 1 https://github.com/madler/zlib.git /tmp/zlib_src
+          cd /tmp/zlib_src
+          ./configure --prefix=/home/runner/ffmpeg_build --static
+          make -j$(nproc) install
+
+          # Build LIBVPX (VP9)
+          git clone --branch v1.15.0 --depth 1 https://github.com/webmproject/libvpx.git /tmp/vpx_src
+          cd /tmp/vpx_src
+          ./configure --prefix=/home/runner/ffmpeg_build --target=$VPX_TARGET --enable-static --disable-shared --enable-pic --disable-docs --disable-examples
+          make -j$(nproc) install
+
+          # Build FFmpeg
+          git clone --branch n7.1 --depth 1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg_src
+          cd /tmp/ffmpeg_src
+          ./configure \
+            --prefix=/home/runner/ffmpeg_build \
+            $CONF_FLAGS \
+            --enable-static \
+            --disable-shared \
+            --enable-pic \
+            --disable-gpl \
+            --disable-everything \
+            --enable-zlib \
+            --disable-doc \
+            --enable-swscale \
+            --enable-protocol=file,http,tcp \
+            --enable-demuxer=mov,matroska,mp3,aac \
+            --enable-muxer=mp4,mov \
+            --enable-decoder=h264,hevc,vp9,av1,aac,mp3,eac3 \
+            --enable-encoder=aac,libvpx_vp9 \
+            --enable-parser=h264,hevc,vp9,av1,aac,mpegaudio \
+            --enable-libvpx \
+            --extra-cflags="-I/home/runner/ffmpeg_build/include" \
+            --extra-ldflags="-L/home/runner/ffmpeg_build/lib"
+          make -j$(nproc) install
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
-          OPENSSL_STATIC: 1
+          OPENSSL_STATIC: "1"
+          FFMPEG_STATIC: "1"
+          RUSTFLAGS: "--cfg tokio_unstable -L /opt/ffmpeg_build/lib -l static=vpx -l static=z"
         with:
           target: ${{ matrix.target }}
+          docker-options: "-v /home/runner/ffmpeg_build:/opt/ffmpeg_build"
           before-script-linux: |
             if command -v yum > /dev/null; then
-                yum install -y perl-IPC-Cmd perl-Time-Piece perl-Data-Dumper
+                yum install -y perl-IPC-Cmd perl-Time-Piece perl-Data-Dumper nasm diffutils make git openssl-devel pkgconf-pkg-config clang clang-devel
             elif command -v apk > /dev/null; then
-                apk add --no-cache perl-utils perl-time-piece
+                apk add --no-cache perl-utils perl-time-piece nasm diffutils make git bash gcc musl-dev openssl-dev pkgconfig clang-dev llvm-dev
             elif command -v apt-get > /dev/null; then
-                apt-get update && apt-get install -y perl-modules
+                apt-get update && apt-get install -y perl-modules nasm diffutils make git libssl-dev pkg-config clang libclang-dev
             fi
-          args: --release --out dist -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14
+
+            mkdir -p .cargo
+            CARGO_TARGET_ENV=$(echo "${{ matrix.target }}" | tr '-' '_')
+
+            cat <<EOF > .cargo/config.toml
+            [env]
+            FFMPEG_DIR = "/opt/ffmpeg_build"
+            FFMPEG_STATIC = "1"
+            PKG_CONFIG_PATH = "/opt/ffmpeg_build/lib/pkgconfig"
+            PKG_CONFIG_ALLOW_CROSS = "1"
+            FFMPEG_DIR_${CARGO_TARGET_ENV}_unknown_linux_gnu = "/opt/ffmpeg_build"
+            FFMPEG_STATIC_${CARGO_TARGET_ENV}_unknown_linux_gnu = "1"
+            FFMPEG_DIR_${CARGO_TARGET_ENV}_unknown_linux_musl = "/opt/ffmpeg_build"
+            FFMPEG_STATIC_${CARGO_TARGET_ENV}_unknown_linux_musl = "1"
+            FFMPEG_DIR_${CARGO_TARGET_ENV}_unknown_linux_musleabihf = "/opt/ffmpeg_build"
+            FFMPEG_STATIC_${CARGO_TARGET_ENV}_unknown_linux_musleabihf = "1"
+            FFMPEG_DIR_${CARGO_TARGET_ENV}_unknown_linux_gnueabihf = "/opt/ffmpeg_build"
+            FFMPEG_STATIC_${CARGO_TARGET_ENV}_unknown_linux_gnueabihf = "1"
+            ${{ matrix.clang_args }}
+            EOF
+          args: --release --out dist -i 3.11 -i 3.12 -i 3.13 -i 3.14
           sccache: 'true'
           manylinux: ${{ matrix.libc == 'musllinux' && (matrix.target == 'x86' && 'musllinux_1_1' || 'musllinux_1_2') || 'manylinux_2_28' }}
       - name: Upload wheels
@@ -54,27 +192,94 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        target: [x64, x86]
+        target: [x64]
     steps:
       - uses: actions/checkout@v3
       - uses: ./.github/actions/set-version
+
       - uses: actions/setup-python@v4
         with:
           python-version: |
-            3.10
             3.11
             3.12
             3.13
             3.14
           architecture: ${{ matrix.target }}
+
+      - name: Install LLVM
+        run: |
+          choco install llvm -y
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Setup MSVC Developer Command Prompt
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+
+      - name: Setup MSYS2 with MSVC
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          path-type: inherit
+          install: make nasm diffutils git
+          cache: false
+
+      - name: Compile ffmpeg
+        shell: msys2 {0}
+        run: |
+          if [ -f /usr/bin/link.exe ]; then
+            mv /usr/bin/link.exe /usr/bin/link-msys.exe
+            echo "Moved MSYS link"
+          fi
+
+          git clone --branch n7.1 --depth 1 https://github.com/FFmpeg/FFmpeg.git ffmpeg_src
+          cd ffmpeg_src
+
+          ./configure \
+            --prefix=/c/ffmpeg_build \
+            --toolchain=msvc \
+            --target-os=win64 \
+            --arch=x86_64 \
+            --enable-static \
+            --disable-shared \
+            --disable-gpl \
+            --disable-everything \
+            --disable-doc \
+            --enable-swscale \
+            --enable-schannel \
+            --enable-protocol=file,http,https,tcp,tls \
+            --enable-demuxer=mov,matroska,mp3,aac \
+            --enable-muxer=mp4,mov \
+            --enable-decoder=h264,hevc,vp9,av1,aac,mp3,eac3 \
+            --enable-encoder=h264_mf,aac \
+            --enable-parser=h264,hevc,vp9,av1,aac,mpegaudio
+
+          make -j$(nproc)
+          make install
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
+          FFMPEG_DIR: 'C:\ffmpeg_build'
+          FFMPEG_STATIC: 1
           OPENSSL_STATIC: 1
+          RUSTFLAGS: >-
+            -C target-feature=+crt-static
+            --cfg tokio_unstable
+            -l dylib=bcrypt
+            -l dylib=user32
+            -l dylib=ole32
+            -l dylib=strmiids
+            -l dylib=shlwapi
+            -l dylib=secur32
+            -l dylib=mfplat
+            -l dylib=mfuuid
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14
+          args: --release --out dist -i 3.11 -i 3.12 -i 3.13 -i 3.14
           sccache: 'true'
+
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -82,28 +287,69 @@ jobs:
           path: dist
 
   macos:
-    runs-on: macos-latest
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
-        target: [x86_64, aarch64]
+        platform:
+          - runner: macos-15-intel
+            target: x86_64
+          - runner: macos-15
+            target: aarch64
     steps:
       - uses: actions/checkout@v3
       - uses: ./.github/actions/set-version
       - uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.11'
+
+      - name: Compile Static FFmpeg
+        run: |
+          BREW_PREFIX=$(brew --prefix)
+
+          brew install nasm pkg-config
+
+          git clone --branch n7.1 --depth 1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg_src
+          cd /tmp/ffmpeg_src
+
+          ./configure \
+            --prefix="$BREW_PREFIX" \
+            --target-os=darwin \
+            --arch=${{ matrix.platform.target }} \
+            --enable-static \
+            --disable-shared \
+            --enable-pic \
+            --disable-gpl \
+            --disable-everything \
+            --disable-doc \
+            --enable-swscale \
+            --extra-cflags="-ffunction-sections -fdata-sections -O3 -g" \
+            --extra-ldflags="-Wl,-dead_strip" \
+            --enable-videotoolbox \
+            --enable-protocol=file,http,tcp \
+            --enable-demuxer=mov,matroska,mp3,aac \
+            --enable-muxer=mp4,mov \
+            --enable-decoder=h264,hevc,vp9,av1,aac,mp3,eac3 \
+            --enable-encoder=aac,h264_videotoolbox \
+            --enable-parser=h264,hevc,vp9,av1,aac,mpegaudio
+
+          make -j$(sysctl -n hw.ncpu)
+          make install
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
-          OPENSSL_STATIC: 1
+          FFMPEG_STATIC: "1"
+          OPENSSL_STATIC: "1"
+          RUSTFLAGS: "--cfg tokio_unstable -l dylib=c++ -C link-arg=-Wl,-dead_strip"
         with:
-          target: ${{ matrix.target }}
-          args: --release --out dist -i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14
-          sccache: 'true'
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist -i 3.11 -i 3.12 -i 3.13 -i 3.14
+          sccache: 'false'
+
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.target }}
+          name: wheels-macos-${{ matrix.platform.target }}
           path: dist
 
   sdist:

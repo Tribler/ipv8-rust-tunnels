@@ -247,7 +247,7 @@ impl Drop for ExitSocket {
     }
 }
 
-#[pyclass(get_all)]
+#[pyclass(get_all, from_py_object)]
 #[derive(Clone)]
 pub struct PyExitStats {
     pub circuit_id: u32,
