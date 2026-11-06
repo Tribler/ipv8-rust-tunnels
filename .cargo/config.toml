@@ -9,5 +9,5 @@ rustflags = [
     "-l", "dylib=shlwapi",
     "-l", "dylib=secur32",
     "-l", "dylib=mfplat",
-    "-l", "dylib=mfuuid",
+    "-l", "dylib=mfuuid"
 ]

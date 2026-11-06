@@ -14,10 +14,6 @@ lto = true
 name = "_rust"
 crate-type = ["cdylib", "rlib"]
 
-[[test]]
-name = "transport"
-path = "tests/transport.rs"
-
 [profile.bench]
 inherits = "release"
 
@@ -59,6 +55,8 @@ openssl = { version = "0.10", features = ["vendored"] }
 flume = "0.12.0"
 dashmap = "6.2.1"
 bencode = "0.1.16"
+ffmpeg-next = { version = "9.0", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"], optional = true }
+httparse = "1.10.1"
 
 tracing = { version = "0.1", features = ["std"] }
 console-subscriber = "0.5.0"
@@ -67,5 +65,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "f
 pyo3 = { version = "0.23.5", features = ["multiple-pymethods"], optional = true }
 
 [features]
-default = ["python-extension"]
-python-extension = ["dep:pyo3", "pyo3/extension-module"]
+default = ["python-extension", "transcoder"]
+pyo3 = ["dep:pyo3"]
+python-extension = ["pyo3", "pyo3/extension-module"]
+transcoder = ["dep:ffmpeg-next"]
