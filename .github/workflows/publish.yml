@@ -62,7 +62,7 @@ jobs:
       - name: Compile ffmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y nasm pkg-config diffutils make git libssl-dev gcc-multilib g++-multilib
+          sudo apt-get install -y nasm pkg-config diffutils make git libssl-dev gcc-multilib g++-multilib autoconf automake libtool
 
           CONF_FLAGS=""
           VPX_TARGET="x86_64-linux-gcc"
@@ -104,7 +104,9 @@ jobs:
               export CXXFLAGS="-m32"
           fi
 
-          export PKG_CONFIG_PATH="/home/runner/ffmpeg_build/lib/pkgconfig"
+          export PKG_CONFIG_LIBDIR="/home/runner/ffmpeg_build/lib/pkgconfig:/home/runner/ffmpeg_build/share/pkgconfig"
+          export PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+          export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
 
           # Build zlib
           git clone --branch v1.3.1 --depth 1 https://github.com/madler/zlib.git /tmp/zlib_src
@@ -118,12 +120,28 @@ jobs:
           ./configure --prefix=/home/runner/ffmpeg_build --target=$VPX_TARGET --enable-static --disable-shared --enable-pic --disable-docs --disable-examples
           make -j$(nproc) install
 
+          # Install NVENC headers
+          git clone --branch n13.1.15.0 --depth 1 https://github.com/FFmpeg/nv-codec-headers.git /tmp/nv_headers
+          cd /tmp/nv_headers
+          make PREFIX=/home/runner/ffmpeg_build install
+
           # Build FFmpeg
           git clone --branch n7.1 --depth 1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg_src
           cd /tmp/ffmpeg_src
+
+          ENCODERS="aac,libvpx_vp9,h264_nvenc"
+          NVENC_FLAGS="--enable-nvenc --enable-ffnvcodec"
+          if [ "${{ matrix.target }}" = "armv7" ] || [ "${{ matrix.target }}" = "s390x" ]; then
+              echo "Target is ${{ matrix.target }}, disabling NVENC"
+              ENCODERS="aac,libvpx_vp9"
+              NVENC_FLAGS=""
+          fi
+
           ./configure \
             --prefix=/home/runner/ffmpeg_build \
             $CONF_FLAGS \
+            $NVENC_FLAGS \
+            --pkg-config=pkg-config \
             --enable-static \
             --disable-shared \
             --enable-pic \
@@ -136,10 +154,10 @@ jobs:
             --enable-demuxer=mov,matroska,mp3,aac \
             --enable-muxer=mp4,mov \
             --enable-decoder=h264,hevc,vp9,av1,aac,mp3,eac3 \
-            --enable-encoder=aac,libvpx_vp9 \
+            --enable-encoder=$ENCODERS \
             --enable-parser=h264,hevc,vp9,av1,aac,mpegaudio \
             --enable-libvpx \
-            --extra-cflags="-I/home/runner/ffmpeg_build/include" \
+            --extra-cflags="-I/home/runner/ffmpeg_build/include -I/home/runner/ffmpeg_build/include/ffnvcodec" \
             --extra-ldflags="-L/home/runner/ffmpeg_build/lib"
           make -j$(nproc) install
       - name: Build wheels
@@ -222,7 +240,7 @@ jobs:
         with:
           msystem: MSYS
           path-type: inherit
-          install: make nasm diffutils git
+          install: make nasm diffutils git pkg-config
           cache: false
 
       - name: Compile ffmpeg
@@ -232,6 +250,11 @@ jobs:
             mv /usr/bin/link.exe /usr/bin/link-msys.exe
             echo "Moved MSYS link"
           fi
+
+          git clone --branch n13.1.15.0 --depth 1 https://github.com/FFmpeg/nv-codec-headers.git nv_headers
+          cd nv_headers
+          make install PREFIX=/usr
+          cd ..
 
           git clone --branch n7.1 --depth 1 https://github.com/FFmpeg/FFmpeg.git ffmpeg_src
           cd ffmpeg_src
@@ -252,7 +275,8 @@ jobs:
             --enable-demuxer=mov,matroska,mp3,aac \
             --enable-muxer=mp4,mov \
             --enable-decoder=h264,hevc,vp9,av1,aac,mp3,eac3 \
-            --enable-encoder=h264_mf,aac \
+            --enable-nvenc \
+            --enable-encoder=h264_mf,aac,h264_nvenc \
             --enable-parser=h264,hevc,vp9,av1,aac,mpegaudio
 
           make -j$(nproc)

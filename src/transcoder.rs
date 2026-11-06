@@ -715,10 +715,10 @@ impl VideoStream {
         // Ordered list of encoders we'd like to use
         let encoder_candidates = vec![
             "h264_nvenc",        // NVIDIA
+            "h264_vaapi",        // VAAPI Intel/AMD
             "h264_videotoolbox", // Apple
             "h264_mf",           // Windows Media Foundation
-            "h264_vaapi",        // VAAPI Intel/AMD
-            "libvpx-vp9",        // Software fallback (VP9)
+            "libvpx-vp9",        // Software fallback (VP9) for Linux
         ];
 
         let target_fps = if metadata.fps > 0.0 { metadata.fps.round() as u32 } else { 30 };
