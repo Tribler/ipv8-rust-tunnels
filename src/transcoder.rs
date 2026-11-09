@@ -8,6 +8,7 @@ use httparse;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::OnceCell;
 
 use ffmpeg_next::codec::Context;
 use ffmpeg_next::media::Type as MediaType;
@@ -71,11 +72,16 @@ impl RequestInfo {
 pub struct TranscodeServer {
     api_url: String,
     cache: Arc<dashmap::DashMap<String, MediaMetadata>>,
+    local_addr: Arc<OnceCell<std::net::SocketAddr>>,
 }
 
 impl Clone for TranscodeServer {
     fn clone(&self) -> Self {
-        TranscodeServer { api_url: self.api_url.clone(), cache: Arc::clone(&self.cache) }
+        TranscodeServer {
+            api_url: self.api_url.clone(),
+            cache: Arc::clone(&self.cache),
+            local_addr: Arc::clone(&self.local_addr),
+        }
     }
 }
 
@@ -231,7 +237,11 @@ impl TranscodeServer {
     pub fn new(api_url: String) -> Self {
         let _ = ffmpeg::init();
         ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Info);
-        TranscodeServer { api_url, cache: Arc::new(dashmap::DashMap::new()) }
+        TranscodeServer {
+            api_url,
+            cache: Arc::new(dashmap::DashMap::new()),
+            local_addr: Arc::new(OnceCell::new()),
+        }
     }
 
     pub fn get_metadata(&self, stream_url: String) -> PyResult<MediaMetadata> {
@@ -239,24 +249,48 @@ impl TranscodeServer {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
     }
 
-    pub fn start_server(&self, port: u16) -> PyResult<()> {
-        let server_this = self.clone();
+    pub fn get_port(&self) -> Option<u16> {
+        self.local_addr.get().map(|addr| addr.port())
+    }
 
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await.unwrap();
-                info!("Streaming server started at port {}", port);
+    /// Starts the transcode server on the specified port.
+    ///
+    /// Note: This function blocks until the socket is bound.
+    pub fn start_server(&self, port: u16, py: Python) -> PyResult<()> {
+        let this = self.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<std::net::SocketAddr, String>>();
 
-                while let Ok((stream, _)) = listener.accept().await {
-                    let server_task = server_this.clone();
-                    tokio::spawn(async move {
-                        server_task.handle_connection(stream).await;
-                    });
-                }
+        py.detach(move || {
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    let listener = match TcpListener::bind(format!("127.0.0.1:{}", port)).await {
+                        Ok(l) => l,
+                        Err(e) => {
+                            let _ = tx.send(Err(e.to_string()));
+                            return;
+                        }
+                    };
+
+                    let local_addr = listener.local_addr().unwrap();
+                    let _ = this.local_addr.set(local_addr);
+                    let _ = tx.send(Ok(local_addr));
+                    info!("Streaming server started at port {}", local_addr.port());
+
+                    while let Ok((stream, _)) = listener.accept().await {
+                        let server_task = this.clone();
+                        tokio::spawn(async move {
+                            server_task.handle_connection(stream).await;
+                        });
+                    }
+                });
             });
-        });
-        Ok(())
+
+            match rx.recv().unwrap() {
+                Ok(_) => Ok(()),
+                Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+            }
+        })
     }
 }
 
