@@ -66,10 +66,18 @@ async fn main() {
         downloader.start_socks5_server(0, 1).await.expect("Failed to start downloader SOCKS5 server");
     let downloader_addr: SocketAddr = format!("127.0.0.1:{}", downloader_port).parse().unwrap();
 
+    let _ = nodes.get(1).unwrap().start_socks5_server(0, 1).await.expect("Failed to start SOCKS5 server");
     let _ = nodes.get(2).unwrap().start_socks5_server(0, 1).await.expect("Failed to start SOCKS5 server");
     let _ = nodes.get(3).unwrap().start_socks5_server(0, 1).await.expect("Failed to start SOCKS5 server");
     let _ = nodes.get(4).unwrap().start_socks5_server(0, 1).await.expect("Failed to start SOCKS5 server");
     let _ = nodes.get(5).unwrap().start_socks5_server(0, 1).await.expect("Failed to start SOCKS5 server");
+
+    // Wait for DHTs...
+    for (index, node) in nodes.iter().enumerate() {
+        while index <= 5 && node.hs_state.dht.load().is_none() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 
     // Only use 1 DHT instance during the benchmark
     for node in &nodes {
