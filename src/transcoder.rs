@@ -12,6 +12,7 @@ use tokio::sync::OnceCell;
 
 use ffmpeg_next::codec::Context;
 use ffmpeg_next::media::Type as MediaType;
+use ffmpeg_next::packet::Mut;
 use ffmpeg_next::{self as ffmpeg, Codec, Rescale};
 use pyo3::prelude::*;
 
@@ -392,6 +393,20 @@ impl TranscodeSession {
 
         let target_duration_ms = self.stop_ms - self.start_ms;
 
+        let mut video_frame = ffmpeg::util::frame::Video::empty();
+        let mut audio_frame = audio_enc_opt.as_ref().map_or_else(
+            || ffmpeg::util::frame::Audio::empty(),
+            |enc| {
+                let samples = enc.frame_size() as usize;
+                let mut f = ffmpeg::util::frame::Audio::new(enc.format(), samples, enc.channel_layout());
+                unsafe {
+                    f.alloc(enc.format(), samples, enc.channel_layout());
+                }
+                f.set_rate(enc.rate() as u32);
+                f
+            },
+        );
+
         let video_enc_name =
             video_enc.codec().map(|c| c.name().to_owned()).unwrap_or_else(|| "unknown".to_owned());
 
@@ -406,8 +421,17 @@ impl TranscodeSession {
                 break;
             }
 
+            // Note that packet.read does not clear it first. If we don't clear manually, it will leak.
+            unsafe {
+                ffmpeg::ffi::av_packet_unref(packet.as_mut_ptr());
+            }
+
             if let Err(e) = packet.read(&mut input) {
-                error!("Failed to read packet: {:?}", e);
+                if e == ffmpeg::Error::Eof {
+                    info!("End of input stream, stopping loop..");
+                } else {
+                    error!("Failed to read packet: {:?}", e);
+                }
                 break;
             }
 
@@ -425,9 +449,9 @@ impl TranscodeSession {
                     continue;
                 }
 
-                while let Ok(Some(mut frame)) = fetch_frame(video_dec, &mut scaler, &video_enc_name) {
+                while let Ok(true) = fetch_frame(video_dec, &mut scaler, &mut video_frame, &video_enc_name) {
                     // Note the we also feed frames from before the start time into the decoder
-                    let video_pts = frame.pts().unwrap_or(0);
+                    let video_pts = video_frame.pts().unwrap_or(0);
                     let video_ms = (video_pts as f64
                         * (in_tb.numerator() as f64 / in_tb.denominator() as f64)
                         * 1000.0) as i64;
@@ -444,7 +468,7 @@ impl TranscodeSession {
                     let video_frame_duration = (video_enc.time_base().denominator() as i64)
                         / (metadata.fps as i64 * video_enc.time_base().numerator() as i64);
 
-                    let assigned_pts = match frame.pts() {
+                    let assigned_pts = match video_frame.pts() {
                         Some(f_pts) => {
                             let rescaled = f_pts.rescale(in_tb, video_enc.time_base());
 
@@ -464,9 +488,9 @@ impl TranscodeSession {
                             safe_pts
                         }
                     };
-                    frame.set_pts(Some(assigned_pts));
+                    video_frame.set_pts(Some(assigned_pts));
 
-                    if let Err(e) = video_enc.send_frame(&frame) {
+                    if let Err(e) = video_enc.send_frame(&video_frame) {
                         error!("Failed to encode video: {:?}", e);
                         continue;
                     }
@@ -506,9 +530,13 @@ impl TranscodeSession {
                         continue;
                     }
 
-                    while let Ok(Some(audio_frame)) =
-                        fetch_audio_frame(audio_dec, audio_enc, &mut audio_resampler, &mut next_audio_pts)
-                    {
+                    while let Ok(true) = fetch_audio_frame(
+                        audio_dec,
+                        audio_enc,
+                        &mut audio_resampler,
+                        &mut audio_frame,
+                        &mut next_audio_pts,
+                    ) {
                         // The pts represents how many audio samples have been compiled since start
                         let current_audio_pts = audio_frame.pts().unwrap_or(0);
                         let sample_rate = audio_enc.rate() as f64;
@@ -550,9 +578,15 @@ impl TranscodeSession {
         }
 
         let _ = output_ctx.write_trailer();
+
         unsafe {
             // Needed to prevent segfaults
-            (*output_ctx.as_mut_ptr()).pb = std::ptr::null_mut();
+            let output_ptr = output_ctx.as_mut_ptr();
+            (*output_ptr).pb = std::ptr::null_mut();
+
+            // Needed to prevent memory leaks
+            ffmpeg::ffi::av_free(io_buffer as *mut c_void);
+
             ffmpeg::ffi::avio_context_free(&mut avio);
         }
         info!("Transcoding completed");
@@ -927,8 +961,9 @@ fn write_stream_packet(
 pub fn fetch_frame(
     decoder: &mut ffmpeg::decoder::Video,
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    dest_frame: &mut ffmpeg::util::frame::Video,
     encoder_name: &str,
-) -> Result<Option<ffmpeg::util::frame::Video>, ffmpeg::Error> {
+) -> Result<bool, ffmpeg::Error> {
     let mut frame = ffmpeg::util::frame::Video::empty();
 
     let target_format = if encoder_name.contains("vaapi") {
@@ -938,8 +973,6 @@ pub fn fetch_frame(
     };
 
     if decoder.receive_frame(&mut frame).is_ok() {
-        let mut normalized_frame = ffmpeg::util::frame::Video::empty();
-
         // Ensure the frame is 8-bits
         if frame.format() != target_format {
             let s = scaler.get_or_insert_with(|| {
@@ -954,23 +987,25 @@ pub fn fetch_frame(
                 )
                 .unwrap()
             });
-            s.run(&frame, &mut normalized_frame)?;
-            normalized_frame.set_pts(frame.pts());
-            return Ok(Some(normalized_frame));
+            s.run(&frame, dest_frame)?;
+            dest_frame.set_pts(frame.pts());
+            return Ok(true);
         } else {
-            return Ok(Some(frame));
+            *dest_frame = frame.clone();
+            return Ok(true);
         }
     }
 
-    Ok(None)
+    Ok(false)
 }
 
 pub fn fetch_audio_frame(
     decoder: &mut ffmpeg::decoder::Audio,
     encoder: &ffmpeg::encoder::Audio,
     resampler: &mut Option<ffmpeg::software::resampling::Context>,
+    dest_frame: &mut ffmpeg::util::frame::Audio,
     next_pts: &mut i64,
-) -> Result<Option<ffmpeg::util::frame::Audio>, ffmpeg::Error> {
+) -> Result<bool, ffmpeg::Error> {
     let mut frame = ffmpeg::util::frame::Audio::empty();
 
     if decoder.receive_frame(&mut frame).is_ok() {
@@ -987,20 +1022,12 @@ pub fn fetch_audio_frame(
         });
 
         let required_samples = encoder.frame_size() as usize;
-        let mut resampled_frame =
-            ffmpeg::util::frame::Audio::new(encoder.format(), required_samples, encoder.channel_layout());
-
-        unsafe {
-            resampled_frame.alloc(encoder.format(), required_samples, encoder.channel_layout());
-        }
-        resampled_frame.set_rate(encoder.rate() as u32);
-
-        if r.run(&frame, &mut resampled_frame).is_ok() {
-            resampled_frame.set_pts(Some(*next_pts));
+        if r.run(&frame, dest_frame).is_ok() {
+            dest_frame.set_pts(Some(*next_pts));
             *next_pts += required_samples as i64;
-            return Ok(Some(resampled_frame));
+            return Ok(true);
         }
     }
 
-    Ok(None)
+    Ok(false)
 }
