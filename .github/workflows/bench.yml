@@ -1,0 +1,30 @@
+name: Benchmarks
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Run cargo bench
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run benchmarks
+        env:
+          RUSTFLAGS: --cfg tokio_unstable -L ${{ env.pythonLocation }}/lib -C link-arg=-lpython3.11
+        run: cargo bench --no-default-features --features pyo3
