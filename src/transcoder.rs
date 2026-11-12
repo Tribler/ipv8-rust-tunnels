@@ -245,8 +245,8 @@ impl TranscodeServer {
         }
     }
 
-    pub fn get_metadata(&self, stream_url: String) -> PyResult<MediaMetadata> {
-        Self::get_metadata_inner(&self.cache, &stream_url)
+    pub fn get_metadata(&self, py: Python<'_>, stream_url: String) -> PyResult<MediaMetadata> {
+        py.detach(|| Self::get_metadata_inner(&self.cache, &stream_url))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
     }
 
@@ -628,6 +628,14 @@ pub struct MediaMetadata {
     pub audio_channels: u16,
     #[pyo3(get, set)]
     pub pix_fmt: String,
+}
+
+#[pymethods]
+impl MediaMetadata {
+    #[pyo3(name = "to_json")]
+    pub fn py_to_json(&self) -> String {
+        self.to_json()
+    }
 }
 
 impl MediaMetadata {
