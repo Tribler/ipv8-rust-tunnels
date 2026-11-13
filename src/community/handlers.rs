@@ -625,7 +625,7 @@ impl TunnelCommunity {
             return Err("Cell too small for HTTP response identifier".to_owned());
         }
 
-        let identifier = u32::from_be_bytes(cell[30..34].try_into().unwrap());
+        let identifier = u32::from_be_bytes(cell[5..9].try_into().unwrap());
         match self.request_cache.get("HTTPRequest", identifier) {
             CacheResult::Stream(cache) => {
                 if let Err(_) = cache.send(cell.clone()).await {
