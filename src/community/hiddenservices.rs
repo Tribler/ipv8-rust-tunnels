@@ -897,9 +897,9 @@ impl TunnelCommunity {
             return Ok(());
         }
 
-        if let Ok(rp) = self.create_rendezvous_point(&infohash).await {
-            let community_clone = self.self_handle.get().unwrap().clone();
-            tokio::spawn(async move {
+        let community_clone = self.self_handle.get().unwrap().clone();
+        self.rt.task_manager.spawn("create-rendezvous-point", async move {
+            if let Ok(rp) = community_clone.create_rendezvous_point(&infohash).await {
                 match rp.address.result_timeout(Duration::from_secs(30)).await {
                     Ok(client_address) => {
                         info!("On create-e2e: rendezvous point is ready at {:?}", client_address);
@@ -909,12 +909,11 @@ impl TunnelCommunity {
                     Err(_) => {
                         warn!("On create-e2e: rendezvous point timed out");
                         community_clone.rt.remove_circuit(rp.circuit.circuit_id);
-                        // TODO: FIX THE CLEANUP
-                        // community_clone.hs_state.rendezvous_point_for.remove(&rp.circuit.circuit_id);
+                        community_clone.hs_state.rendezvous_point_for.remove(&rp.cookie);
                     }
                 }
-            });
-        }
+            }
+        });
         Ok(())
     }
 
@@ -1061,40 +1060,50 @@ impl TunnelCommunity {
             public_key: PublicKey::from_bytes(&rp_info.key.data).map_err(|e| format!("{e}"))?,
             private_key: None,
         };
-        let circuit = self
-            .create_circuit_for_infohash(
-                &cache.info_hash,
-                CircuitType::RPDownloader,
-                None,
-                Some(required_exit),
-            )
-            .await?;
-        let identifier = self.request_cache.generate_identifier() as u16;
-        self.request_cache.add_identifier(
-            "LinkRequestCache".to_owned(),
-            identifier,
-            Some(10),
-            Some(Arc::new(LinkRequestCache {
-                circuit: circuit.clone(),
-                info_hash: cache.info_hash.clone(),
-                session_keys: Arc::new(session_keys),
-            })),
-        );
 
-        let response = LinkE2EPayload { circuit_id: circuit.circuit_id, identifier, cookie: rp_info.cookie };
+        let community_clone = self.self_handle.get().unwrap().clone();
+        self.rt.task_manager.spawn("create-rp-downloader", async move {
+            let circuit = match community_clone
+                .create_circuit_for_infohash(
+                    &cache.info_hash,
+                    CircuitType::RPDownloader,
+                    None,
+                    Some(required_exit),
+                )
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("On created-e2e: failed to create RPDownloader circuit: {}", e);
+                    return;
+                }
+            };
 
-        if let Some(swarm) = self.hs_state.swarms.load().get(&cache.info_hash) {
-            swarm.add_connection(circuit.clone(), cache.intro_point.clone());
-        }
+            let identifier = community_clone.request_cache.generate_identifier() as u16;
+            community_clone.request_cache.add_identifier(
+                "LinkRequestCache".to_owned(),
+                identifier,
+                Some(10),
+                Some(Arc::new(LinkRequestCache {
+                    circuit: circuit.clone(),
+                    info_hash: cache.info_hash.clone(),
+                    session_keys: Arc::new(session_keys),
+                })),
+            );
 
-        self.hs_state
-            .swarms
-            .load()
-            .get(&cache.info_hash)
-            .ok_or_else(|| "swarm doesn't exist".to_owned())?
-            .add_connection(circuit.clone(), cache.intro_point.clone());
+            let response =
+                LinkE2EPayload { circuit_id: circuit.circuit_id, identifier, cookie: rp_info.cookie };
 
-        self.rt.send_cell(&response, None).await?;
+            if let Some(swarm) = community_clone.hs_state.swarms.load().get(&cache.info_hash) {
+                swarm.add_connection(circuit.clone(), cache.intro_point.clone());
+            } else {
+                warn!("On created-e2e: swarm doesn't exist for infohash");
+                return;
+            }
+
+            let _ = community_clone.rt.send_cell(&response, None).await;
+        });
+
         Ok(())
     }
 
