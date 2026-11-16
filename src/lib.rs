@@ -45,9 +45,10 @@ pub fn _rust(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<community::engine::PyTunnelEngine>()?;
     m.add_class::<community::settings::PyTunnelSettings>()?;
 
+    m.add_class::<community::routing::circuit::PyHopStats>()?;
     m.add_class::<community::routing::circuit::PyCircuitStats>()?;
-    m.add_class::<community::routing::circuit::CircuitState>()?;
     m.add_class::<community::routing::relay::PyRelayStats>()?;
+    m.add_class::<community::routing::rendezvous::PyRendezvousStats>()?;
     m.add_class::<community::routing::exit::PyExitStats>()?;
 
     m.add("PEER_FLAG_RELAY", community::routing::peer::PeerFlag::Relay as u32)?;
@@ -55,6 +56,7 @@ pub fn _rust(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PEER_FLAG_EXIT_IPV8", community::routing::peer::PeerFlag::ExitIpv8 as u32)?;
     m.add("PEER_FLAG_SPEED_TEST", community::routing::peer::PeerFlag::SpeedTest as u32)?;
     m.add("PEER_FLAG_EXIT_HTTP", community::routing::peer::PeerFlag::ExitHttp as u32)?;
+    m.add("PEER_FLAG_BACKUP", community::routing::peer::PeerFlag::ExitBackup as u32)?;
 
     #[cfg(all(feature = "python-extension", feature = "transcoder"))]
     {

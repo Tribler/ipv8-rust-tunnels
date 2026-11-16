@@ -1,6 +1,13 @@
-from typing import Final, Optional, List, Tuple, Any, Dict, Set
+from typing import Final, Optional, List, Tuple, Any, Dict, Set, Literal
 
 __version__: str
+
+PEER_FLAG_RELAY: Final[int]
+PEER_FLAG_EXIT_BT: Final[int]
+PEER_FLAG_EXIT_IPV8: Final[int]
+PEER_FLAG_SPEED_TEST: Final[int]
+PEER_FLAG_EXIT_HTTP: Final[int]
+PEER_FLAG_BACKUP: Final[int]
 
 class PublicKey:
     """
@@ -112,7 +119,7 @@ class _Endpoint:
     @property
     def debug_port(self) -> int: ...
 
-class EndpointNotOpenError(Exception): ...
+class NotOpenError(Exception): ...
 class InvalidAddressError(Exception): ...
 
 def generate_safe_prime(bit_length: int) -> int: 
@@ -156,3 +163,104 @@ class TunnelEngine:
     def run_speedtest(self, circuit_id: int, test_time: int, request_size: int, 
                       response_size: int, target_rtt: int, callback: Any, 
                       callback_interval: int) -> None: ...
+
+class TunnelSettings:
+    """Configuration settings for the TunnelEngine."""
+    prefix: bytes
+    prefixes: List[bytes]
+    min_circuits: int
+    max_circuits: int
+    max_joined_circuits: int
+    max_relay_early: int
+    max_time_inactive: int
+    max_time_extending: int
+    max_time: int
+    max_traffic: int
+    next_hop_timeout: int
+    exit_addr: str
+    default_remotes: Dict[int, str]
+    swarm_lookup_interval: int
+    swarm_connection_limit: int
+
+    def __init__(self) -> None: ...
+
+    @property
+    def peer_flags(self) -> List[int]: ...
+    @peer_flags.setter
+    def peer_flags(self, raw_flags: Set[int]) -> None: ...
+
+class HopStats:
+    address: str
+    mid: bytes
+    public_key: bytes
+    is_verified: bool
+    flags: List[int]
+
+class CircuitStats:
+    circuit_id: int
+    goal_hops: int
+    peer: str
+    creation_time: int
+    state: Literal["Ready", "Extending", "Closing"]
+    circuit_type: str
+    data_ready: bool
+    hops: List[HopStats]
+    exit_flags: List[int]
+    bytes_up: int
+    bytes_down: int
+    last_received: int
+
+class ExitStats:
+    circuit_id: int
+    enabled: bool
+    bytes_up: int
+    bytes_down: int
+    creation_time: int
+    is_introduction: bool
+    is_rendezvous: bool
+
+class RelayStats:
+    circuit_id_fw: int
+    circuit_id_bw: int
+    is_rendezvous: bool
+    bytes_up: int
+    bytes_down: int
+    creation_time: int
+
+class RendezvousStats:
+    circuit_id_dl: int
+    circuit_id_sd: int
+    peer_dl: str
+    peer_sd: str
+    bytes_up: int
+    bytes_down: int
+    creation_time: int
+
+class MediaMetadata:
+    """Metadata extracted from a stream."""
+    duration: float
+    container: str
+    has_video: bool
+    video_codec: str
+    video_tag: str
+    width: int
+    height: int
+    video_bitrate: int
+    fps: float
+    has_audio: bool
+    audio_codec: str
+    audio_tag: str
+    audio_sample_rate: int
+    audio_channels: int
+    pix_fmt: str
+
+    def to_json(self) -> str: ...
+
+class TranscodeServer:
+    """HTTP transcoding server backed by FFmpeg."""
+    def __init__(self, api_url: str) -> None: ...
+    def get_metadata(self, stream_url: str) -> MediaMetadata: ...
+    def get_port(self) -> Optional[int]: ...
+    def start_server(self, port: int) -> None:
+        """Starts the transcode server on the specified port. Blocks until the socket is bound."""
+        ...

@@ -16,15 +16,22 @@ from ._rust import (
     NotOpenError,
     TunnelEngine,
     TunnelSettings,
+    HopStats,
+    CircuitStats,
+    RelayStats,
+    ExitStats,
+    RendezvousStats,
     PEER_FLAG_RELAY,
     PEER_FLAG_EXIT_BT,
     PEER_FLAG_EXIT_IPV8,
     PEER_FLAG_SPEED_TEST,
-    PEER_FLAG_EXIT_HTTP
+    PEER_FLAG_EXIT_HTTP,
+    PEER_FLAG_BACKUP
 )
 
 if TYPE_CHECKING:
     from .endpoint import Endpoint
+    from ._rust import MediaMetadata, TranscodeServer
 
 
 def __getattr__(name: str):
@@ -41,6 +48,11 @@ __all__ = [
     "Endpoint",
     "TunnelEngine",
     "TunnelSettings",
+    "HopStats",
+    "CircuitStats",
+    "RelayStats",
+    "ExitStats",
+    "RendezvousStats",
     "PrivateKey",
     "PublicKey",
     "SessionKeys",
@@ -58,4 +70,8 @@ __all__ = [
     "PEER_FLAG_EXIT_IPV8",
     "PEER_FLAG_SPEED_TEST",
     "PEER_FLAG_EXIT_HTTP",
+    "PEER_FLAG_BACKUP",
 ]
+
+if hasattr(_rust, "TranscodeServer"):
+    __all__ += ["MediaMetadata", "TranscodeServer"]

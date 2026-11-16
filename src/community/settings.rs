@@ -126,7 +126,7 @@ impl PyTunnelSettings {
     }
 
     #[getter]
-    pub fn peer_flags(&self) -> Vec<u16> {
+    pub fn peer_flags(&self) -> HashSet<u16> {
         self.peer_flags.iter().map(|&f| f as u16).collect()
     }
 
@@ -135,11 +135,12 @@ impl PyTunnelSettings {
         self.peer_flags = raw_flags
             .into_iter()
             .filter_map(|f| match f {
-                1 => Some(PeerFlag::Relay),
-                2 => Some(PeerFlag::ExitBt),
-                4 => Some(PeerFlag::ExitIpv8),
-                8 => Some(PeerFlag::SpeedTest),
-                32768 => Some(PeerFlag::ExitHttp),
+                x if x == PeerFlag::Relay as u16 => Some(PeerFlag::Relay),
+                x if x == PeerFlag::ExitBt as u16 => Some(PeerFlag::ExitBt),
+                x if x == PeerFlag::ExitIpv8 as u16 => Some(PeerFlag::ExitIpv8),
+                x if x == PeerFlag::SpeedTest as u16 => Some(PeerFlag::SpeedTest),
+                x if x == PeerFlag::ExitBackup as u16 => Some(PeerFlag::ExitBackup),
+                x if x == PeerFlag::ExitHttp as u16 => Some(PeerFlag::ExitHttp),
                 _ => None,
             })
             .collect();

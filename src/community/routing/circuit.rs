@@ -252,7 +252,7 @@ impl Circuit {
     }
 }
 
-#[pyclass(get_all, from_py_object)]
+#[pyclass(name = "HopStats", get_all, from_py_object)]
 #[derive(Clone)]
 pub struct PyHopStats {
     pub address: String,
@@ -262,7 +262,7 @@ pub struct PyHopStats {
     pub flags: Vec<u16>,
 }
 
-#[pyclass(get_all, from_py_object)]
+#[pyclass(name = "CircuitStats", get_all, from_py_object)]
 #[derive(Clone)]
 pub struct PyCircuitStats {
     pub circuit_id: u32,

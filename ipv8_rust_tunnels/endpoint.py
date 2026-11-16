@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ipv8.messaging.interfaces.udp.endpoint import Address
 
-from . import _rust as rust, CircuitState
+from . import _rust as rust
 
 from ipv8.messaging.interfaces.endpoint import EndpointListener
 from ipv8.messaging.interfaces.network_stats import NetworkStat
