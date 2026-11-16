@@ -2,9 +2,12 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use openssl::symm::{Cipher, Crypter, Mode};
-use portable_atomic::AtomicU128;
 
 use crate::util::to_hex;
+
+const WINDOW_SLOTS: usize = 32;
+// Number of packets our window can fit
+pub const WINDOW_SIZE: u64 = (WINDOW_SLOTS * 32) as u64;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub enum Direction {
@@ -18,16 +21,31 @@ impl fmt::Display for Direction {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct CounterWindow {
-    // First 64 bits represents the highest salt_explicit we've seen
-    // The second 64 bits serves as a bitmap of which salt_explicits we've seen up to that point
-    state: AtomicU128,
+    // The highest counter (salt_explicit) we've seen
+    highest: AtomicU64,
+    // Ring buffer that tracks received counters.
+    // For each slot: [upper 32 bits represents the block_id (counter / 32)] | [lower 32 bits represents a bitmap]
+    slots: [AtomicU64; WINDOW_SLOTS],
+}
+
+impl Default for CounterWindow {
+    fn default() -> Self {
+        Self {
+            highest: AtomicU64::new(0),
+            // Initialize block_id to u32::MAX so block 0 always triggers a clean reset on first use
+            slots: std::array::from_fn(|_| AtomicU64::new((u32::MAX as u64) << 32)),
+        }
+    }
 }
 
 impl Clone for CounterWindow {
     fn clone(&self) -> Self {
-        Self { state: AtomicU128::new(self.state.load(Ordering::Relaxed)) }
+        Self {
+            highest: AtomicU64::new(self.highest.load(Ordering::Relaxed)),
+            slots: std::array::from_fn(|i| AtomicU64::new(self.slots[i].load(Ordering::Relaxed))),
+        }
     }
 }
 
@@ -37,26 +55,36 @@ impl CounterWindow {
             return false;
         }
 
-        self.state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                let highest = (current >> 64) as u64;
-                let bitmap = current as u64;
+        // Update highest
+        let prev_highest = self.highest.fetch_max(counter, Ordering::AcqRel);
+        // Our sliding window has moved beyond the point of the counter
+        if prev_highest.saturating_sub(counter) >= WINDOW_SIZE {
+            return false;
+        }
 
-                if counter > highest {
-                    let diff = counter - highest;
-                    let new_bitmap = if diff >= 64 { 1 } else { (bitmap << diff) | 1 };
-                    Some(((counter as u128) << 64) | (new_bitmap as u128))
+        let block_id_pkt = (counter / 32) as u32;
+        let bit_mask = 1u32 << (counter % 32);
+        let slot_idx = (block_id_pkt as usize) % WINDOW_SLOTS;
+
+        // Atomically update the bit for the current packet (AcqRel/Acquire keeps updates ordered across threads).
+        self.slots[slot_idx]
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |slot| {
+                let block_id = (slot >> 32) as u32;
+                let bitmap = slot as u32;
+
+                if block_id == block_id_pkt {
+                    // Bit is already set
+                    if (bitmap & bit_mask) != 0 {
+                        return None;
+                    }
+                    // Set the bit
+                    Some(((block_id_pkt as u64) << 32) | ((bitmap | bit_mask) as u64))
+                } else if block_id_pkt.wrapping_sub(block_id) < 0x8000_0000 {
+                    // We have 2 competing block_ids. If block_id_pkt is ahead of block_id (difference < 2^31), we update
+                    Some(((block_id_pkt as u64) << 32) | (bit_mask as u64))
                 } else {
-                    let diff = highest - counter;
-                    if diff >= 64 {
-                        return None;
-                    }
-                    let mask = 1u64 << diff;
-                    if (bitmap & mask) != 0 {
-                        return None;
-                    }
-                    let new_bitmap = bitmap | mask;
-                    Some(((highest as u128) << 64) | (new_bitmap as u128))
+                    // Old packet arrives, but the current block_id is ahead
+                    None
                 }
             })
             .is_ok()

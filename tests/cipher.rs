@@ -1,6 +1,6 @@
 use std::sync::atomic::AtomicU64;
 
-use _rust::crypto::cipher::{Direction, SessionKeys};
+use _rust::crypto::cipher::{Direction, SessionKeys, WINDOW_SIZE};
 
 fn dummy_keys_with_seed(seed: u8) -> SessionKeys {
     SessionKeys {
@@ -164,8 +164,8 @@ fn test_reject_packet_outside_window() {
     let mut old_packet = b"packet 1".to_vec();
     client.encrypt_in_place(&mut old_packet, Direction::Forward).unwrap();
 
-    // Send and process 65 newer packets (window size is 64)
-    for _ in 2..=66 {
+    // Send and process WINDOW_SIZE+1 newer packets
+    for _ in 2..=(WINDOW_SIZE + 1) {
         let mut buf = b"newer".to_vec();
         client.encrypt_in_place(&mut buf, Direction::Forward).unwrap();
         relay.decrypt_in_place(&mut buf, Direction::Forward).unwrap();
