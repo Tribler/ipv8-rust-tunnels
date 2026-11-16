@@ -16,21 +16,10 @@ jobs:
           toolchain: stable
           components: rustfmt
           target: x86_64-unknown-linux-gnu
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: 3.12
-      - name: Setup dependencies
-        run: |
-          pip install --upgrade pip
-          pip install pytest typing_extensions
-          pip install https://github.com/Tribler/py-ipv8/archive/master.zip
+      - uses: Swatinem/rust-cache@v2
       - name: Check rust formatting (rustfmt)
         run: cargo fmt --all -- --check
-      - name: Build and run Python tests
-        run: |
-          cargo build
-          cp target/debug/lib_rust.so ipv8_rust_tunnels/_rust.so
-          export PYTHONPATH=$(pwd):$PYTHONPATH
-          echo "PYTHONPATH=.:$PYTHONPATH" >> $GITHUB_ENV
-          pytest ipv8_rust_tunnels
+      - name: Run unit tests
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+        run: cargo test --no-default-features --features pyo3 --verbose
