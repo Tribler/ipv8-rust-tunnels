@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use openssl::symm::{Cipher, Crypter, Mode};
+use portable_atomic::AtomicU128;
 
 use crate::util::to_hex;
 
@@ -17,6 +18,51 @@ impl fmt::Display for Direction {
     }
 }
 
+#[derive(Default, Debug)]
+pub struct CounterWindow {
+    // First 64 bits represents the highest salt_explicit we've seen
+    // The second 64 bits serves as a bitmap of which salt_explicits we've seen up to that point
+    state: AtomicU128,
+}
+
+impl Clone for CounterWindow {
+    fn clone(&self) -> Self {
+        Self { state: AtomicU128::new(self.state.load(Ordering::Relaxed)) }
+    }
+}
+
+impl CounterWindow {
+    fn check_and_update(&self, counter: u64) -> bool {
+        if counter == 0 {
+            return false;
+        }
+
+        self.state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let highest = (current >> 64) as u64;
+                let bitmap = current as u64;
+
+                if counter > highest {
+                    let diff = counter - highest;
+                    let new_bitmap = if diff >= 64 { 1 } else { (bitmap << diff) | 1 };
+                    Some(((counter as u128) << 64) | (new_bitmap as u128))
+                } else {
+                    let diff = highest - counter;
+                    if diff >= 64 {
+                        return None;
+                    }
+                    let mask = 1u64 << diff;
+                    if (bitmap & mask) != 0 {
+                        return None;
+                    }
+                    let new_bitmap = bitmap | mask;
+                    Some(((highest as u128) << 64) | (new_bitmap as u128))
+                }
+            })
+            .is_ok()
+    }
+}
+
 #[derive(Default)]
 pub struct SessionKeys {
     pub key_forward: Vec<u8>,
@@ -25,6 +71,8 @@ pub struct SessionKeys {
     pub salt_backward: Vec<u8>,
     pub salt_explicit_forward: AtomicU64,
     pub salt_explicit_backward: AtomicU64,
+    pub window_forward: CounterWindow,
+    pub window_backward: CounterWindow,
 }
 
 impl fmt::Debug for SessionKeys {
@@ -49,6 +97,8 @@ impl Clone for SessionKeys {
             salt_backward: self.salt_backward.clone(),
             salt_explicit_forward: AtomicU64::new(self.salt_explicit_forward.load(Ordering::Relaxed)),
             salt_explicit_backward: AtomicU64::new(self.salt_explicit_backward.load(Ordering::Relaxed)),
+            window_forward: self.window_forward.clone(),
+            window_backward: self.window_backward.clone(),
         }
     }
 }
@@ -60,12 +110,16 @@ impl SessionKeys {
             return Err("Content too short".to_string());
         }
 
-        let (key, salt) = match direction {
-            Direction::Forward => (&self.key_forward, &self.salt_forward),
-            Direction::Backward => (&self.key_backward, &self.salt_backward),
+        let (key, salt, window) = match direction {
+            Direction::Forward => (&self.key_forward, &self.salt_forward, &self.window_forward),
+            Direction::Backward => (&self.key_backward, &self.salt_backward, &self.window_backward),
         };
 
         // Create the 12-byte Chacha20-Poly1305 nonce (salt + counter)
+        let mut counter_bytes = [0u8; 8];
+        counter_bytes.copy_from_slice(&raw_buffer[..8]);
+        let counter = u64::from_be_bytes(counter_bytes);
+
         let mut nonce = [0u8; 12];
         nonce[..4].copy_from_slice(salt);
         nonce[4..12].copy_from_slice(&raw_buffer[..8]);
@@ -92,6 +146,10 @@ impl SessionKeys {
             bytes_written += crypter
                 .finalize(&mut out_part[bytes_written..])
                 .map_err(|_| "AEAD integrity check failed".to_string())?;
+
+            if !window.check_and_update(counter) {
+                return Err("Replay/old packet detected".to_string());
+            }
 
             raw_buffer.set_len(8 + bytes_written);
         }

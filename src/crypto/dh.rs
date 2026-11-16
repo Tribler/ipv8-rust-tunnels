@@ -218,6 +218,8 @@ pub fn generate_session_keys(shared_secret: &[u8]) -> Result<SessionKeys, String
 
         salt_explicit_backward: AtomicU64::new(1),
         salt_explicit_forward: AtomicU64::new(1),
+
+        ..Default::default()
     })
 }
 
