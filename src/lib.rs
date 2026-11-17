@@ -50,6 +50,7 @@ pub fn _rust(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<community::routing::relay::PyRelayStats>()?;
     m.add_class::<community::routing::rendezvous::PyRendezvousStats>()?;
     m.add_class::<community::routing::exit::PyExitStats>()?;
+    m.add_class::<community::hiddenservices::PySwarmStats>()?;
 
     m.add("PEER_FLAG_RELAY", community::routing::peer::PeerFlag::Relay as u32)?;
     m.add("PEER_FLAG_EXIT_BT", community::routing::peer::PeerFlag::ExitBt as u32)?;

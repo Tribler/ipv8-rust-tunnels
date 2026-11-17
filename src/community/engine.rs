@@ -4,13 +4,13 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::IntoPyObjectExt;
 
-use crate::community::hiddenservices::{HiddenServiceState, PySwarm};
-use crate::community::routing::circuit::{PyCircuitStats, PyHopStats};
+use crate::community::hiddenservices::{HiddenServiceState, PySwarmStats};
+use crate::community::routing::circuit::{CircuitState, CircuitType, PyCircuitStats, PyHopStats};
 use crate::community::routing::exit::PyExitStats;
 use crate::community::routing::peer::{PeerCache, PeerFlag};
 use crate::community::routing::relay::PyRelayStats;
@@ -33,6 +33,7 @@ pub struct PyTunnelEngine {
     pub community: ArcSwapOption<TunnelCommunity>,
     pub listener: ArcSwapOption<PacketListener>,
     pub socks_servers: Arc<ArcSwap<HashMap<SocketAddr, Socks5Server>>>,
+    pub state_callback: Arc<ArcSwapOption<Py<PyAny>>>,
 }
 
 #[pymethods]
@@ -43,6 +44,7 @@ impl PyTunnelEngine {
             community: ArcSwapOption::empty(),
             listener: ArcSwapOption::empty(),
             socks_servers: Arc::new(arc_swap::ArcSwap::from_pointee(HashMap::new())),
+            state_callback: Arc::new(ArcSwapOption::empty()),
         }
     }
 
@@ -112,6 +114,21 @@ impl PyTunnelEngine {
         active_communities.insert(prefix, Community::Tunnel(tunnel_community.clone()));
         listener.router().communities.store(Arc::new(active_communities));
 
+        // Spawn circuit state notifier
+        let state_rx = tunnel_community.rt.runtime.circuit_state_rx.clone();
+        let state_cb = slf.state_callback.clone();
+        tunnel_community.rt.task_manager.spawn("circuit-state-listener", async move {
+            while let Ok((circuit_id, state)) = state_rx.recv_async().await {
+                if let Some(cb) = state_cb.load().as_ref() {
+                    Python::attach(|py| {
+                        if let Err(e) = cb.call1(py, (circuit_id, state.to_string())) {
+                            error!("Circuit state callback failed: {}", e);
+                        }
+                    });
+                }
+            }
+        });
+
         info!("Starting TunnelCommunity background tasks");
         TunnelCommunity::start(&tunnel_community);
 
@@ -125,6 +142,7 @@ impl PyTunnelEngine {
 
     pub fn stop(&self, _py: Python, timeout_secs: u64) -> PyResult<()> {
         info!("Stopping tunnel engine...");
+        self.state_callback.store(None);
 
         if let Some(tunnel_community) = self.community.swap(None) {
             let tm_engine = tunnel_community.rt.task_manager.clone();
@@ -139,6 +157,10 @@ impl PyTunnelEngine {
         self.socks_servers.store(Arc::new(HashMap::new()));
         info!("Tunnel engine shutdown completed");
         Ok(())
+    }
+
+    pub fn set_circuit_state_callback(&self, callback: Option<Py<PyAny>>) {
+        self.state_callback.store(callback.map(Arc::new));
     }
 
     pub fn create_socks5_server(&self, port: u16, hops: u8) -> PyResult<u16> {
@@ -224,6 +246,98 @@ impl PyTunnelEngine {
             }
         }
         Ok(PyList::new(py, result)?.into_any().unbind())
+    }
+
+    #[pyo3(signature = (
+        ctype = Some("DATA"),
+        state = Some("READY"),
+        exit_flags = None,
+        hops = None
+    ))]
+    pub fn count_circuits(
+        &self,
+        ctype: Option<&str>,
+        state: Option<&str>,
+        exit_flags: Option<Vec<u16>>,
+        hops: Option<u8>,
+    ) -> PyResult<usize> {
+        let ctype = match ctype {
+            Some(s) => Some(match s.to_ascii_uppercase().as_str() {
+                "DATA" => CircuitType::Data,
+                "IP_SEEDER" | "IPSEEDER" => CircuitType::IPSeeder,
+                "IP_DOWNLOADER" | "IPDOWNLOADER" => CircuitType::IPDownloader,
+                "RP_SEEDER" | "RPSEEDER" => CircuitType::RPSeeder,
+                "RP_DOWNLOADER" | "RPDOWNLOADER" => CircuitType::RPDownloader,
+                _ => return Err(PyValueError::new_err(format!("Unknown circuit type: {s}"))),
+            }),
+            None => None,
+        };
+        let state = match state {
+            Some(s) => Some(match s.to_ascii_uppercase().as_str() {
+                "READY" => CircuitState::Ready,
+                "EXTENDING" => CircuitState::Extending,
+                "CLOSING" => CircuitState::Closing,
+                _ => return Err(PyValueError::new_err(format!("Unknown circuit state: {s}"))),
+            }),
+            None => None,
+        };
+
+        let rt = self.get_rt()?;
+        let count = rt
+            .circuits
+            .load()
+            .values()
+            .filter(|c| state.map_or(true, |s| c.state() == s))
+            .filter(|c| ctype.as_ref().map_or(true, |t| &c.circuit_type == t))
+            .filter(|c| {
+                exit_flags.as_ref().map_or(true, |req_flags| {
+                    let c_flags = c.exit_flags();
+                    req_flags.iter().all(|f| c_flags.contains(f))
+                })
+            })
+            .filter(|c| hops.map_or(true, |h| c.goal_hops == h))
+            .count();
+
+        Ok(count)
+    }
+
+    #[pyo3(signature = (info_hash, hops, seeding = false))]
+    pub fn join_swarm(&self, info_hash: &[u8], hops: u8, seeding: bool) -> PyResult<()> {
+        let ih: [u8; 20] =
+            info_hash.try_into().map_err(|_| PyValueError::new_err("info_hash must be 20 bytes"))?;
+
+        let community = self.get_community()?;
+        community.join_swarm(ih, hops, seeding).map_err(PyRuntimeError::new_err)
+    }
+
+    pub fn leave_swarm(&self, info_hash: &[u8]) -> PyResult<()> {
+        let community = self.get_community()?;
+        community.leave_swarm(info_hash);
+        Ok(())
+    }
+
+    pub fn create_introduction_point(&self, info_hash: &[u8]) -> PyResult<()> {
+        let ih: [u8; 20] =
+            info_hash.try_into().map_err(|_| PyValueError::new_err("info_hash must be 20 bytes"))?;
+
+        let community = self.get_community()?;
+        let community_clone = community.clone();
+        community.rt.task_manager.spawn("create-intro-point", async move {
+            if let Err(e) = community_clone.create_introduction_point(&ih, None).await {
+                error!("Failed to create introduction point: {}", e);
+            }
+        });
+        Ok(())
+    }
+
+    pub fn has_intro_point(&self, info_hash: &[u8]) -> PyResult<bool> {
+        let rt = self.get_rt()?;
+        let exists = rt.circuits.load().values().any(|c| {
+            c.circuit_type == CircuitType::IPSeeder
+                && c.state() != CircuitState::Closing
+                && c.infohash.as_deref() == Some(info_hash)
+        });
+        Ok(exists)
     }
 
     pub fn set_exit_address(&self, address: &Bound<'_, PyTuple>) -> PyResult<()> {
@@ -357,8 +471,8 @@ impl PyTunnelEngine {
             .swarms
             .load()
             .iter()
-            .map(|(&info_hash, swarm)| PySwarm {
-                info_hash,
+            .map(|(&info_hash, swarm)| PySwarmStats {
+                info_hash: info_hash.to_vec(),
                 num_intro_points: swarm.get_intro_points().len(),
                 num_seeders: swarm.get_num_seeders(),
                 num_connections: swarm.get_num_connections(),
@@ -419,8 +533,8 @@ impl PyTunnelEngine {
 
             let pub_key_obj = candidate.getattr("public_key")?;
             let pub_key_bytes: Vec<u8> = pub_key_obj.call_method0("key_to_bin")?.extract()?;
-            let public_key = PublicKey::from_bytes(&pub_key_bytes)
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            let public_key =
+                PublicKey::from_bytes(&pub_key_bytes).map_err(|e| PyValueError::new_err(e.to_string()))?;
             let raw_flags = raw_flags_obj.cast::<PyList>()?.extract::<Vec<u16>>()?;
 
             let mut flags = HashSet::new();

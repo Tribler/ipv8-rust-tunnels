@@ -467,7 +467,10 @@ impl TunnelCommunity {
         if let Some(target) = self.rt.get_routing_object(id) {
             match target {
                 RoutingTarget::Circuit(c) => {
-                    c.closing.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let was_ready = c.state() == CircuitState::Ready;
+                    if !c.closing.swap(true, std::sync::atomic::Ordering::Relaxed) && was_ready {
+                        self.rt.runtime.notify_circuit_state(id, CircuitState::Closing);
+                    }
                     let rt = self.rt.clone();
                     let hs_state = self.hs_state.clone();
                     self.rt.task_manager.spawn("circuit-remove-pending", async move {

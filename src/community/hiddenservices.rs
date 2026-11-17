@@ -1346,10 +1346,10 @@ impl TunnelCommunity {
     }
 }
 
-#[pyclass(get_all, from_py_object)]
+#[pyclass(name = "SwarmStats", get_all, from_py_object)]
 #[derive(Clone)]
-pub struct PySwarm {
-    pub info_hash: [u8; 20],
+pub struct PySwarmStats {
+    pub info_hash: Vec<u8>,
     pub num_intro_points: usize,
     pub num_seeders: usize,
     pub num_connections: usize,

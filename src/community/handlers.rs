@@ -354,6 +354,7 @@ impl TunnelCommunity {
             CircuitState::Ready => {
                 info!("Circuit {} has reached {} hops and is READY!", circuit.circuit_id, circuit.goal_hops);
                 let _ = circuit.ready.set(Ok(()));
+                self.rt.runtime.notify_circuit_state(circuit.circuit_id, CircuitState::Ready);
             }
             _ => warn!("Circuit {} encountered unhandled state: {:?}", circuit.circuit_id, circuit.state()),
         }
