@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::IntoPyObjectExt;
 
-use crate::community::hiddenservices::{HiddenServiceState, PySwarmStats};
+use crate::community::hiddenservices::{E2ECallback, HiddenServiceState, PySwarmStats};
 use crate::community::routing::circuit::{CircuitState, CircuitType, PyCircuitStats, PyHopStats};
 use crate::community::routing::exit::PyExitStats;
 use crate::community::routing::peer::{PeerCache, PeerFlag};
@@ -90,11 +90,6 @@ impl PyTunnelEngine {
         let prefix_hex: String = prefix.iter().map(|b| format!("{:02X}", b)).collect();
 
         info!("Creating TunnelCommunity {} with flags: {:?}", prefix_hex, settings.load().peer_flags);
-
-        // Using duck-typing to avoid making a mess of the function signature.
-        let config_bound = config.clone().into_pyobject(py)?;
-        let e2e_callback = config_bound.getattr("e2e_callback").ok().map(|item| item.unbind());
-
         let tunnel_community = Arc::new(TunnelCommunity {
             prefix,
             rt: RoutingTable::new(tx_outbound, my_sk.core.clone(), settings.clone(), tm_engine),
@@ -103,7 +98,7 @@ impl PyTunnelEngine {
             self_handle: OnceLock::new(),
             socks_servers: slf.socks_servers.clone(),
             local_addr: listener.local_addr(),
-            hs_state: Arc::new(HiddenServiceState::new(e2e_callback)),
+            hs_state: Arc::new(HiddenServiceState::new(None)),
         });
 
         tunnel_community
@@ -341,6 +336,40 @@ impl PyTunnelEngine {
                 && c.infohash.as_deref() == Some(info_hash)
         });
         Ok(exists)
+    }
+
+    pub fn set_e2e_callback(&self, callback: Option<Py<PyAny>>) -> PyResult<()> {
+        let community = self.get_community()?;
+        community.hs_state.e2e_callback.store(callback.map(|cb| Arc::new(E2ECallback::Python(cb))));
+        Ok(())
+    }
+
+    pub fn get_dht_info(&self) -> PyResult<(Vec<u8>, u16)> {
+        let community = self.get_community()?;
+        let dht_guard = community.hs_state.dht.load();
+        let Some(dht) = dht_guard.as_ref() else {
+            return Err(PyRuntimeError::new_err("DHT not initialized"));
+        };
+
+        let (node_id, addr) = dht.get_announce_info().map_err(|e| PyRuntimeError::new_err(e))?;
+        Ok((node_id.to_vec(), addr.port()))
+    }
+
+    pub fn add_dht_node(&self, node_id: Vec<u8>, ip: String, port: u16) -> PyResult<()> {
+        let id: [u8; 20] =
+            node_id.try_into().map_err(|_| PyValueError::new_err("node_id must be 20 bytes"))?;
+        let addr: SocketAddr = format!("{}:{}", ip, port)
+            .parse()
+            .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
+
+        let community = self.get_community()?;
+        let dht_guard = community.hs_state.dht.load();
+        let Some(dht) = dht_guard.as_ref() else {
+            return Err(PyRuntimeError::new_err("DHT not initialized"));
+        };
+
+        dht.add_node(id, addr);
+        Ok(())
     }
 
     pub fn set_exit_address(&self, address: &Bound<'_, PyTuple>) -> PyResult<()> {

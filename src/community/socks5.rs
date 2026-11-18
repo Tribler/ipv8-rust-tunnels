@@ -18,7 +18,6 @@ use tokio::time::timeout;
 use crate::community::routing::circuit::{Circuit, CircuitState, CircuitType};
 use crate::community::routing::peer::PeerFlag;
 use crate::community::routing::table::RoutingTable;
-use crate::community::runtime::TunnelEvent;
 use crate::community::serialization::{ip_to_circuit_id, CellPayload};
 use crate::community::serialization::{
     Address, HTTPRequestPayload, HTTPResponsePayload, Socks5Payload, VarLenH,
@@ -192,16 +191,11 @@ impl Socks5Server {
         }
 
         // Let's request a circuit and wait a bit..
-        if cid_available.is_none() {
-            let is_ready =
-                self.rt.runtime.notifier.wait_timeout(TunnelEvent::CircuitState, Duration::from_secs(2));
-            self.rt.runtime.notifier.notify(TunnelEvent::CircuitsNeeded, None);
-
-            if let Some(Some((cid, CircuitState::Ready))) = is_ready.await {
-                if let Some(c) = self.rt.circuits.load().get(&cid) {
-                    if c.goal_hops == self.hops && c.data_ready() && c.has_exit_flag(&PeerFlag::ExitHttp) {
-                        cid_available = Some(cid);
-                    }
+        if cid_available.is_none() && self.rt.wait_for_next_circuit(Duration::from_secs(2)).await {
+            for (_, c) in self.rt.circuits.load().iter() {
+                if c.goal_hops == self.hops && c.data_ready() && c.has_exit_flag(&PeerFlag::ExitHttp) {
+                    cid_available = Some(c.circuit_id);
+                    break;
                 }
             }
         }
@@ -288,8 +282,13 @@ impl UDPAssociate {
         let mut buf = [0; 2048];
 
         info!("Listening on UDP associate socket {} ({} hops)", self.socket.local_addr().unwrap(), self.hops);
-        // Trigger circuit creation within the TunnelCommunity
-        self.rt.runtime.notifier.notify(TunnelEvent::CircuitsNeeded, None);
+        // Trigger circuit creation within the TunnelCommunity if needed.
+        // Note that we're not guaranteed to be successful here, we're just poking the circuit builder.
+        let has_circuit =
+            self.rt.circuits.load().values().any(|c| c.goal_hops == self.hops && c.data_ready());
+        if !has_circuit {
+            self.rt.wait_for_next_circuit(std::time::Duration::from_secs(2)).await;
+        }
 
         loop {
             match self.socket.recv_from(&mut buf).await {

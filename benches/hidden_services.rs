@@ -142,7 +142,7 @@ async fn main() {
     let _ = c.ready.result().await;
 
     println!("Start get_ips response loop...");
-    intro_node.response_ip_lookup().expect("Failed to start get_ips loop");
+    intro_node.response_ip_lookup();
 
     println!("Creating introduction point...");
     let intro_peer = Peer {

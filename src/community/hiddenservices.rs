@@ -513,10 +513,7 @@ impl TunnelCommunity {
         let swarms_guard = self.hs_state.swarms.load();
 
         if swarms_guard.contains_key(&info_hash) {
-            warn!(
-                "Already part of hidden swarm {}, purging pre-existing connection trees.",
-                to_hex(&info_hash)
-            );
+            warn!("Already part of hidden swarm {}. Leaving swarm first.", to_hex(&info_hash));
             self.leave_swarm(&info_hash);
         }
 
@@ -1292,30 +1289,28 @@ impl TunnelCommunity {
         Ok(())
     }
 
-    pub fn response_ip_lookup(&self) -> Result<()> {
+    pub fn response_ip_lookup(&self) {
         let tunnels = self.self_handle.get().expect("Self handle uninitialized").clone();
 
         self.rt.task_manager.spawn("community_discover_extensions", async move {
-            let dht_guard = tunnels.hs_state.dht.load();
-            let Some(dht) = dht_guard.as_ref() else {
-                error!("DHT not running");
-                return;
-            };
-
-            let dht_announce = Arc::clone(&dht.dht_announce);
-            let dht_rx = dht_announce.extensions_rx.clone();
-
-            let my_wan = match tunnels.rt.runtime.my_estimated_wan.load().clone() {
-                Some(addr) => *addr,
-                None => {
-                    error!("Failed to respond to get_ips: my_estimated_wan not set");
+            let (dht_announce, dht_rx) = {
+                let dht_guard = tunnels.hs_state.dht.load();
+                let Some(dht) = dht_guard.as_ref() else {
+                    error!("DHT not running");
                     return;
-                }
+                };
+                (Arc::clone(&dht.dht_announce), dht.dht_announce.extensions_rx.clone())
             };
+
             let my_pk = tunnels.rt.runtime.get_my_public_key().clone();
 
             while let Ok(query) = dht_rx.recv_async().await {
                 if query.method == b"get_ips" {
+                    let Some(my_wan) = tunnels.rt.runtime.my_estimated_wan.load().as_deref().copied() else {
+                        warn!("Received get_ips query before my_estimated_wan was set, ignoring");
+                        continue;
+                    };
+
                     let args_bencode = bencode::Bencode::Dict(query.args);
                     let Ok(req) = IPRequest::from_bencode(&args_bencode) else {
                         continue;
@@ -1342,7 +1337,6 @@ impl TunnelCommunity {
                 }
             }
         });
-        Ok(())
     }
 }
 

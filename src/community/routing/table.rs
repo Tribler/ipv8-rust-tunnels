@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use crate::community::routing::circuit::CircuitState;
 use crate::community::routing::rendezvous::Rendezvous;
 use crate::community::routing::{circuit::Circuit, exit::ExitSocket, relay::Relay};
-use crate::community::runtime::RuntimeContext;
+use crate::community::runtime::{RuntimeContext, TunnelEvent};
 use crate::community::serialization::{CellPayload, NO_CRYPTO_PACKETS};
 use crate::community::settings::TunnelSettings;
 use crate::crypto::keys::PrivateKey;
@@ -143,6 +144,12 @@ impl RoutingTable {
             return Err(format!("Outbound channel error: {}", e));
         }
         Ok(payload_len + 22)
+    }
+
+    pub async fn wait_for_next_circuit(&self, timeout: std::time::Duration) -> bool {
+        let is_ready = self.runtime.notifier.wait_timeout(TunnelEvent::CircuitState, timeout);
+        self.runtime.notifier.notify(TunnelEvent::CircuitsNeeded, None);
+        matches!(is_ready.await, Some(Some((_, CircuitState::Ready))))
     }
 
     pub fn insert_circuit(&self, circuit_id: u32, circuit: Arc<Circuit>) {

@@ -68,6 +68,13 @@ impl DHT {
     }
 
     pub async fn bootstrap(self: &Arc<Self>) -> Result<(), String> {
+        if let Ok(addr) = self.transport.local_addr() {
+            if addr.ip().is_loopback() {
+                info!("Skipping public DHT bootstrap. Socket is bound to loopback ({})", addr);
+                return Ok(());
+            }
+        }
+
         let routers = [
             "dht.aelitis.com:6881",
             "dht.libtorrent.org:6881",
@@ -139,7 +146,10 @@ impl DHT {
 
         let packet =
             query.to_bencode().to_bytes().map_err(|e| format!("Failed to serialize request: {:?}", e))?;
-        self.transport.send_to(&packet, target).await?;
+        self.transport
+            .send_to(&packet, target)
+            .await
+            .map_err(|e| format!("error sending to {target}: {e}"))?;
 
         let response = dht_future
             .result_timeout(timeout)
@@ -169,7 +179,11 @@ impl DHT {
 
         let packet =
             response.to_bencode().to_bytes().map_err(|e| format!("Failed to serialize response: {:?}", e))?;
-        self.transport.send_to(&packet, target).await?;
+
+        self.transport
+            .send_to(&packet, target)
+            .await
+            .map_err(|e| format!("error sending to {target}: {e}"))?;
         Ok(())
     }
 
@@ -178,8 +192,18 @@ impl DHT {
         let mut buffer = [0u8; 2048];
 
         loop {
-            let (bytes_read, origin) = self.transport.recv_from(&mut buffer).await?;
+            let (bytes_read, origin) = match self.transport.recv_from(&mut buffer).await {
+                Ok(res) => res,
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+                Err(e) => return Err(format!("error reading: {e}")),
+            };
             let pkt = &buffer[..bytes_read];
+
+            // Get rid of uTP spam, we're a DHT only node
+            if pkt.first() != Some(&b'd') {
+                trace!("Ignoring non-bencode UDP packet ({} bytes) from {}", bytes_read, origin);
+                continue;
+            }
 
             let pkt_query = match DhtQuery::from_buffer(pkt) {
                 Ok(pkt) => pkt,
@@ -424,7 +448,9 @@ impl DHTWrapper {
         let proxy_transport = TransportSocket::Proxied(proxy_socket);
         let dht_discover = DHT::new(proxy_transport, task_manager.clone(), 4096, 4096);
 
-        let direct_udp = UdpSocket::bind("0.0.0.0:0")
+        // Useful for testing
+        let bind_addr = if proxy_addr.ip().is_loopback() { "127.0.0.1:0" } else { "0.0.0.0:0" };
+        let direct_udp = UdpSocket::bind(bind_addr)
             .await
             .map_err(|e| format!("DHTWrapper failed to create UDP socket: {}", e))?;
         let direct_socket = Arc::new(DirectUdpSocket { socket: direct_udp });
@@ -445,6 +471,19 @@ impl DHTWrapper {
     pub fn stop_announce(&self, info_hash: &[u8; 20]) -> bool {
         self.dht_announce.stop_announce(info_hash);
         true
+    }
+
+    pub fn get_announce_info(&self) -> Result<([u8; 20], SocketAddr), String> {
+        let addr = match &self.dht_announce.transport {
+            TransportSocket::Direct(s) => s.socket.local_addr().map_err(|e| e.to_string())?,
+            _ => return Err("dht_announce is not using a direct UDP socket".to_string()),
+        };
+        Ok((self.dht_announce.node_id, addr))
+    }
+
+    pub fn add_node(&self, node_id: [u8; 20], addr: SocketAddr) {
+        self.dht_announce.nodes.update(node_id, addr);
+        self.dht_discover.nodes.update(node_id, addr);
     }
 
     pub fn start(&self) {

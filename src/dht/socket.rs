@@ -13,21 +13,21 @@ pub enum TransportSocket {
 }
 
 impl TransportSocket {
-    pub async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize, String> {
+    pub async fn send_to(&self, buf: &[u8], target: SocketAddr) -> std::io::Result<usize> {
         match self {
             TransportSocket::Direct(s) => s.send_to(buf, target).await,
             TransportSocket::Proxied(s) => s.send_to(buf, target).await,
         }
     }
 
-    pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), String> {
+    pub async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
         match self {
             TransportSocket::Direct(s) => s.recv_from(buf).await,
             TransportSocket::Proxied(s) => s.recv_from(buf).await,
         }
     }
 
-    pub fn local_addr(&self) -> Result<SocketAddr, String> {
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         match self {
             TransportSocket::Direct(s) => s.local_addr(),
             TransportSocket::Proxied(s) => s.local_addr(),
@@ -40,16 +40,16 @@ pub struct DirectUdpSocket {
 }
 
 impl DirectUdpSocket {
-    pub async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize, String> {
-        self.socket.send_to(buf, target).await.map_err(|e| format!("error sending to {target}: {e}"))
+    pub async fn send_to(&self, buf: &[u8], target: SocketAddr) -> std::io::Result<usize> {
+        self.socket.send_to(buf, target).await
     }
 
-    pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), String> {
-        self.socket.recv_from(buf).await.map_err(|e| format!("error reading: {e}"))
+    pub async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        self.socket.recv_from(buf).await
     }
 
-    pub fn local_addr(&self) -> Result<SocketAddr, String> {
-        self.socket.local_addr().map_err(|e| format!("error getting local_addr: {e}"))
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
     }
 }
 
@@ -86,19 +86,19 @@ impl Socks5ProxiedSocket {
         Ok(())
     }
 
-    pub async fn send_to(self: &Arc<Self>, buf: &[u8], target: SocketAddr) -> Result<usize, String> {
+    pub async fn send_to(self: &Arc<Self>, buf: &[u8], target: SocketAddr) -> std::io::Result<usize> {
         let guard = self.udp.load();
         let Some(udp_socket) = guard.as_ref() else {
-            return Err("error getting DHT socket".to_string());
+            return Err(std::io::Error::other("error getting DHT socket"));
         };
 
         let payload = Socks5Payload { rsv: 0, frag: 0, dst: target.into(), data: Raw { data: buf.to_vec() } };
-        let packet = payload.to_bytes().map_err(|e| format!("error serializing SOCKS55: {e}"))?;
-        let target_addr: SocketAddr = **(self.proxy_addr.load());
+        let packet = payload
+            .to_bytes()
+            .map_err(|e| std::io::Error::other(format!("error serializing SOCKS5: {e}")))?;
 
-        if let Err(e) = udp_socket.send_to(&packet, target_addr).await {
+        if let Err(e) = udp_socket.send(&packet).await {
             warn!("Failed to send DHT packet. Reconnecting now...");
-
             let self_clone = Arc::clone(self);
             tokio::spawn(async move {
                 if let Err(err) = self_clone.reconnect().await {
@@ -106,24 +106,22 @@ impl Socks5ProxiedSocket {
                 }
             });
 
-            return Err(format!("error sending DHT packet: {e}"));
+            return Err(e);
         }
-
         Ok(buf.len())
     }
 
-    pub async fn recv_from(self: &Arc<Self>, buf: &mut [u8]) -> Result<(usize, SocketAddr), String> {
+    pub async fn recv_from(self: &Arc<Self>, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
         let guard = self.udp.load();
         let Some(udp_socket) = guard.as_ref() else {
-            return Err("error getting DHT socket".to_string());
+            return Err(std::io::Error::other("error getting DHT socket"));
         };
 
         let mut inbound_buf = [0u8; 2048];
-        let (bytes_read, _src) =
-            udp_socket.recv_from(&mut inbound_buf).await.map_err(|e| format!("error reading: {e}"))?;
+        let bytes_read = udp_socket.recv(&mut inbound_buf).await?;
 
         let (_, payload) = Socks5Payload::from_bytes((&inbound_buf[..bytes_read], 0))
-            .map_err(|e| format!("error unserializing SOCKS5: {e}"))?;
+            .map_err(|e| std::io::Error::other(format!("error unserializing SOCKS5: {e}")))?;
 
         let packet = payload.data.data;
         let origin: SocketAddr = match &payload.dst {
@@ -132,10 +130,9 @@ impl Socks5ProxiedSocket {
             Address::DomainAddress(var_len, port) => {
                 let host_str = String::from_utf8_lossy(&var_len.data).into_owned();
                 tokio::net::lookup_host(format!("{}:{}", host_str, port))
-                    .await
-                    .map_err(|e| format!("failed to lookup host: {e}"))?
+                    .await?
                     .next()
-                    .ok_or_else(|| "failed to lookup host: empty address".to_string())?
+                    .ok_or_else(|| std::io::Error::other("failed to lookup host: empty address"))?
             }
         };
 
@@ -144,11 +141,11 @@ impl Socks5ProxiedSocket {
         Ok((data_len, origin))
     }
 
-    pub fn local_addr(self: &Arc<Self>) -> Result<SocketAddr, String> {
+    pub fn local_addr(self: &Arc<Self>) -> std::io::Result<SocketAddr> {
         let guard = self.udp.load();
         let Some(udp_socket) = guard.as_ref() else {
-            return Err("error getting DHT socket".to_string());
+            return Err(std::io::Error::other("error getting DHT socket"));
         };
-        udp_socket.local_addr().map_err(|e| format!("error in local_addr: {e}"))
+        udp_socket.local_addr()
     }
 }

@@ -23,6 +23,7 @@ impl TunnelCommunity {
     pub fn start(&self) {
         self.start_circuit_manager();
         self.start_ping();
+        self.start_peer_discovery();
     }
 
     pub fn start_circuit_manager(&self) {
@@ -587,6 +588,7 @@ impl TunnelCommunity {
 
             dht_wrapper.start();
             tunnels.hs_state.dht.store(Some(dht_wrapper));
+            tunnels.response_ip_lookup();
         });
     }
 }
