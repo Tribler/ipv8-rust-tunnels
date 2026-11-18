@@ -479,34 +479,38 @@ impl TunnelCommunity {
     pub fn start_peer_discovery(&self) {
         let tunnels = self.self_handle.get().expect("Self handle uninitialized").clone();
 
+        let tunnels_interval = tunnels.clone();
         self.rt.task_manager.spawn_interval("do_peer_discovery", Duration::from_secs(30), true, move || {
-            let tunnels_clone = tunnels.clone();
-
+            let tunnels = tunnels_interval.clone();
             async move {
-                let settings = tunnels_clone.rt.settings.load();
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-
-                let swarms_guard = tunnels_clone.hs_state.swarms.load();
-                for (&info_hash, swarm) in swarms_guard.iter() {
-                    if swarm.seeding.load(Ordering::Relaxed) {
-                        continue;
-                    }
-
-                    let last_lookup = swarm.last_lookup.load(Ordering::Relaxed);
-                    if last_lookup + settings.swarm_lookup_interval > now {
-                        continue;
-                    }
-
-                    if swarm.get_num_connections() >= settings.swarm_connection_limit {
-                        continue;
-                    }
-
-                    // Move timestamp first to avoid race conditions.
-                    swarm.last_lookup.store(now, Ordering::Relaxed);
-                    let _ = tunnels_clone.request_ip_lookup(&info_hash).await;
-                }
+                tunnels.do_peer_discovery().await;
             }
         });
+    }
+
+    pub async fn do_peer_discovery(&self) {
+        let settings = self.rt.settings.load();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+        let swarms_guard = self.hs_state.swarms.load();
+        for (&info_hash, swarm) in swarms_guard.iter() {
+            if swarm.seeding.load(Ordering::Relaxed) {
+                continue;
+            }
+
+            let last_lookup = swarm.last_lookup.load(Ordering::Relaxed);
+            if last_lookup + settings.swarm_lookup_interval > now {
+                continue;
+            }
+
+            if swarm.get_num_connections() >= settings.swarm_connection_limit {
+                continue;
+            }
+
+            // Move timestamp first to avoid race conditions.
+            swarm.last_lookup.store(now, Ordering::Relaxed);
+            let _ = self.request_ip_lookup(&info_hash).await;
+        }
     }
 
     pub fn join_swarm(&self, info_hash: [u8; 20], hops: u8, seeding: bool) -> Result<()> {
@@ -543,6 +547,16 @@ impl TunnelCommunity {
             next_map.insert(info_hash, Arc::clone(&new_swarm));
             next_map
         });
+
+        if !seeding {
+            let tunnels = self.self_handle.get().expect("Self handle uninitialized").clone();
+            self.rt.task_manager.spawn(
+                &format!("initial_peer_discovery_{}", to_hex(&info_hash)),
+                async move {
+                    tunnels.do_peer_discovery().await;
+                },
+            );
+        }
 
         info!("Successfully joined hidden swarm hash: {}", to_hex(&info_hash));
         Ok(())
@@ -1200,6 +1214,17 @@ impl TunnelCommunity {
         };
 
         info!("Start announcing introduction point for {}...", to_hex(&info_hash));
+
+        let has_data_circuit = self
+            .rt
+            .circuits
+            .load()
+            .values()
+            .any(|c| c.circuit_type == CircuitType::Data && c.goal_hops == 1 && c.data_ready());
+
+        if !has_data_circuit {
+            self.rt.wait_for_next_circuit(Duration::from_secs(2)).await;
+        }
 
         match dht_handle.lookup(info_hash).await {
             Ok(result) => {
