@@ -43,7 +43,7 @@ impl RoutingTable {
         settings: Arc<ArcSwap<TunnelSettings>>,
         task_manager: TaskManager,
     ) -> Self {
-        let runtime = RuntimeContext::new();
+        let runtime = RuntimeContext::new(task_manager.clone());
         runtime.my_sk.store(Some(Arc::new(my_private_key)));
 
         Self {

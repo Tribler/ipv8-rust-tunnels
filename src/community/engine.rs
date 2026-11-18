@@ -16,6 +16,7 @@ use crate::community::routing::peer::{PeerCache, PeerFlag};
 use crate::community::routing::relay::PyRelayStats;
 use crate::community::routing::rendezvous::PyRendezvousStats;
 use crate::community::routing::table::RoutingTable;
+use crate::community::runtime::TunnelEvent;
 use crate::community::serialization::Address;
 use crate::community::settings::PyTunnelSettings;
 use crate::community::socks5::Socks5Server;
@@ -114,17 +115,19 @@ impl PyTunnelEngine {
         active_communities.insert(prefix, Community::Tunnel(tunnel_community.clone()));
         listener.router().communities.store(Arc::new(active_communities));
 
-        // Spawn circuit state notifier
-        let state_rx = tunnel_community.rt.runtime.circuit_state_rx.clone();
+        // Register circuit state notifier
         let state_cb = slf.state_callback.clone();
-        tunnel_community.rt.task_manager.spawn("circuit-state-listener", async move {
-            while let Ok((circuit_id, state)) = state_rx.recv_async().await {
-                if let Some(cb) = state_cb.load().as_ref() {
-                    Python::attach(|py| {
-                        if let Err(e) = cb.call1(py, (circuit_id, state.to_string())) {
-                            error!("Circuit state callback failed: {}", e);
-                        }
-                    });
+        tunnel_community.rt.runtime.notifier.on(TunnelEvent::CircuitState, move |data| {
+            let state_cb = state_cb.clone();
+            async move {
+                if let Some((circuit_id, state)) = data {
+                    if let Some(cb) = state_cb.load().as_ref() {
+                        Python::attach(|py| {
+                            if let Err(e) = cb.call1(py, (circuit_id, state.to_string())) {
+                                error!("Circuit state callback failed: {}", e);
+                            }
+                        });
+                    }
                 }
             }
         });

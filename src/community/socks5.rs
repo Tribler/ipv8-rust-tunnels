@@ -18,6 +18,7 @@ use tokio::time::timeout;
 use crate::community::routing::circuit::{Circuit, CircuitState, CircuitType};
 use crate::community::routing::peer::PeerFlag;
 use crate::community::routing::table::RoutingTable;
+use crate::community::runtime::TunnelEvent;
 use crate::community::serialization::{ip_to_circuit_id, CellPayload};
 use crate::community::serialization::{
     Address, HTTPRequestPayload, HTTPResponsePayload, Socks5Payload, VarLenH,
@@ -189,6 +190,22 @@ impl Socks5Server {
                 break;
             }
         }
+
+        // Let's request a circuit and wait a bit..
+        if cid_available.is_none() {
+            let is_ready =
+                self.rt.runtime.notifier.wait_timeout(TunnelEvent::CircuitState, Duration::from_secs(2));
+            self.rt.runtime.notifier.notify(TunnelEvent::CircuitsNeeded, None);
+
+            if let Some(Some((cid, CircuitState::Ready))) = is_ready.await {
+                if let Some(c) = self.rt.circuits.load().get(&cid) {
+                    if c.goal_hops == self.hops && c.data_ready() && c.has_exit_flag(&PeerFlag::ExitHttp) {
+                        cid_available = Some(cid);
+                    }
+                }
+            }
+        }
+
         let Some(cid) = cid_available else {
             return Err("No HTTP circuit available".to_string());
         };
@@ -271,6 +288,8 @@ impl UDPAssociate {
         let mut buf = [0; 2048];
 
         info!("Listening on UDP associate socket {} ({} hops)", self.socket.local_addr().unwrap(), self.hops);
+        // Trigger circuit creation within the TunnelCommunity
+        self.rt.runtime.notifier.notify(TunnelEvent::CircuitsNeeded, None);
 
         loop {
             match self.socket.recv_from(&mut buf).await {

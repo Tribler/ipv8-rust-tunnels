@@ -6,6 +6,7 @@ use pyo3::{create_exception, prelude::*};
 pub mod community;
 pub mod crypto;
 pub mod dht;
+pub mod notifier;
 pub mod peer;
 pub mod request_cache;
 pub mod task_manager;

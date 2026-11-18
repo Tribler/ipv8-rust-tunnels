@@ -10,6 +10,7 @@ use tokio::time::sleep;
 use crate::community::routing::circuit::{Circuit, CircuitState, CircuitType, Hop};
 use crate::community::routing::peer::PeerFlag;
 use crate::community::routing::table::RoutingTarget;
+use crate::community::runtime::TunnelEvent;
 use crate::community::serialization::{CreatePayload, DestroyPayload, DestroyReason, PingPayload, VarLenH};
 use crate::community::socks5::Socks5Server;
 use crate::community::tunnels::TunnelCommunity;
@@ -25,55 +26,69 @@ impl TunnelCommunity {
     }
 
     pub fn start_circuit_manager(&self) {
-        let rt_base = self.rt.clone();
         let tunnels = self.self_handle.get().expect("Self handle uninitialized").clone();
 
+        let tunnels_interval = tunnels.clone();
         self.rt.task_manager.spawn_interval("do_circuits", Duration::from_secs(30), true, move || {
-            let rt_clone = rt_base.clone();
-            let tunnels_clone = tunnels.clone();
-
+            let tunnels = tunnels_interval.clone();
             async move {
-                let circuits_needed = tunnels_clone.calculate_circuits_needed();
-                let circuits_guard = rt_clone.circuits.load();
-                let mut create_tasks = tokio::task::JoinSet::new();
-
-                for (circuit_length, target_count) in circuits_needed {
-                    let current_count = circuits_guard
-                        .values()
-                        .filter(|c| c.goal_hops == circuit_length && c.state() != CircuitState::Closing)
-                        .count() as u8;
-
-                    let num_to_build = target_count.saturating_sub(current_count);
-                    if num_to_build == 0 {
-                        continue;
-                    }
-
-                    info!("Want {} more data circuits of length {}", num_to_build, circuit_length);
-
-                    for _ in 0..num_to_build {
-                        let tunnels_clone_task = tunnels_clone.clone();
-                        create_tasks.spawn(async move {
-                            if tunnels_clone_task
-                                .create_circuit(
-                                    circuit_length,
-                                    CircuitType::Data,
-                                    Some(HashSet::from([PeerFlag::ExitBt])),
-                                    None,
-                                    None,
-                                )
-                                .await
-                                .is_err()
-                            {
-                                info!("Circuit creation failed: no first hops available");
-                            }
-                        });
-                    }
-                }
-
-                while let Some(_) = create_tasks.join_next().await {}
-                tunnels_clone.do_remove().await;
+                tunnels.do_circuits().await;
             }
         });
+
+        self.rt.runtime.notifier.on(TunnelEvent::CircuitsNeeded, move |_| {
+            let tunnels = tunnels.clone();
+            async move {
+                info!("Got CircuitNeeded event, calling do_circuits immediately");
+                tunnels.do_circuits().await;
+            }
+        });
+    }
+
+    pub async fn do_circuits(&self) {
+        let circuits_needed = self.calculate_circuits_needed();
+        let mut create_tasks = tokio::task::JoinSet::new();
+
+        {
+            let circuits_guard = self.rt.circuits.load();
+
+            for (circuit_length, target_count) in circuits_needed {
+                let current_count = circuits_guard
+                    .values()
+                    .filter(|c| c.goal_hops == circuit_length && c.state() != CircuitState::Closing)
+                    .count() as u8;
+
+                let num_to_build = target_count.saturating_sub(current_count);
+                if num_to_build == 0 {
+                    continue;
+                }
+
+                info!("Want {} more data circuits of length {}", num_to_build, circuit_length);
+
+                for _ in 0..num_to_build {
+                    let tunnels_clone_task =
+                        self.self_handle.get().expect("Self handle uninitialized").clone();
+                    create_tasks.spawn(async move {
+                        if tunnels_clone_task
+                            .create_circuit(
+                                circuit_length,
+                                CircuitType::Data,
+                                Some(HashSet::from([PeerFlag::ExitBt])),
+                                None,
+                                None,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            info!("Circuit creation failed: no first hops available");
+                        }
+                    });
+                }
+            }
+        }
+
+        while let Some(_) = create_tasks.join_next().await {}
+        self.do_remove().await;
     }
 
     fn calculate_circuits_needed(&self) -> HashMap<u8, u8> {
