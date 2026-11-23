@@ -85,13 +85,24 @@ class SessionKeys:
         """Decrypt using ChaCha20-Poly1305 (expects salt_explicit + ciphertext + tag)."""
         ...
 
+class _EndpointSettings:
+    """Configuration settings for the Endpoint."""
+    prefixes: List[bytes]
+    num_threads: int
+    single_threaded: bool
+    worker_tasks: int
+    send_tasks: int
+    recv_tasks: int
+
+    def __init__(self) -> None: ...
+
 class _Endpoint:
     """
     High-performance Rust UDP endpoint with SOCKS5 support.
     """
-    def __init__(self, listen_addr: str, list_port: int) -> None: ...
+    def __init__(self, listen_addr: str, list_port: int, settings: Optional[_EndpointSettings] = None) -> None: ...
     
-    def open(self, callback: Any, worker_threads: int) -> bool: 
+    def open(self, callback: Any) -> bool: 
         """Start the Tokio runtime and bind the socket."""
         ...
     def close(self, timeout_secs: int) -> None: 

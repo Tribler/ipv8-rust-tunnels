@@ -27,6 +27,7 @@ pub fn _rust(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     telemetry::init_telemetry();
 
     m.add_class::<transport::endpoint::Endpoint>()?;
+    m.add_class::<transport::settings::PyEndpointSettings>()?;
     m.add("NotOpenError", py.get_type::<NotOpenError>())?;
     m.add("InvalidAddressError", py.get_type::<InvalidAddressError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

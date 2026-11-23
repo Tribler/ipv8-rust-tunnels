@@ -44,7 +44,7 @@ impl EndpointSettings {
     }
 }
 
-#[pyclass(name = "EndpointSettings", get_all, set_all, from_py_object)]
+#[pyclass(name = "_EndpointSettings", get_all, set_all, from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyEndpointSettings {
     pub prefixes: Vec<Vec<u8>>,
@@ -62,7 +62,12 @@ impl Default for PyEndpointSettings {
 }
 
 #[pymethods]
-impl PyEndpointSettings {}
+impl PyEndpointSettings {
+    #[new]
+    pub fn new() -> Self {
+        Self::from_native(&EndpointSettings::new())
+    }
+}
 
 impl PyEndpointSettings {
     pub fn into_native(&self) -> EndpointSettings {
