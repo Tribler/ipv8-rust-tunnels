@@ -684,12 +684,18 @@ impl TunnelCommunity {
 
         self.hs_state.intro_point_for.insert(public_key.clone(), (Arc::clone(exit_socket), infohash.clone()));
 
-        self.start_ip_announce(payload.info_hash).await.expect("Failed to announce introduction point");
-
         let response_payload =
             IntroEstablishedPayload { circuit_id: exit_socket.circuit_id, identifier: payload.identifier };
 
-        self.rt.send_cell(&response_payload, None).await?;
+        let self_clone = self.self_handle.get().expect("Self handle uninitialized").clone();
+        self.rt.task_manager.spawn(&format!("ip-announce-{}", to_hex(&infohash)), async move {
+            if let Err(e) = self_clone.start_ip_announce(infohash).await {
+                error!("Failed to announce introduction point: {e}");
+            }
+            if let Err(e) = self_clone.rt.send_cell(&response_payload, None).await {
+                error!("Failed to send IntroEstablished cell: {e}");
+            }
+        });
         Ok(())
     }
 
