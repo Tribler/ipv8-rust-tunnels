@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use _rust::init_logging;
 use rand::Rng;
 
 use _rust::community::routing::circuit::CircuitType;
@@ -22,7 +23,7 @@ use crate::common::connect_communities;
 
 #[tokio::main]
 async fn main() {
-    _rust::telemetry::init_telemetry();
+    init_logging();
 
     let settings = Arc::new(arc_swap::ArcSwap::from_pointee(EndpointSettings::default()));
     let mut nodes = Vec::new();

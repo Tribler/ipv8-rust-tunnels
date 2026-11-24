@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use _rust::init_logging;
 use _rust::util::start_socks5_client;
 use rand::Rng;
 use socks5_proto::{Address as Socks5Address, UdpHeader};
@@ -35,12 +36,11 @@ async fn run_echo_server(socket: tokio::net::UdpSocket) {
 
 #[tokio::main]
 async fn main() {
-    _rust::telemetry::init_telemetry();
+    init_logging();
 
     let settings = Arc::new(arc_swap::ArcSwap::from_pointee(EndpointSettings::default()));
     let mut nodes = Vec::new();
     let mut listeners = Vec::new();
-    let cache = PeerCache::new();
     for i in 0..3 {
         let flags = match i {
             0 => HashSet::new(),

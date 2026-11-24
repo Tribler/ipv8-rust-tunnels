@@ -10,7 +10,6 @@ pub mod notifier;
 pub mod peer;
 pub mod request_cache;
 pub mod task_manager;
-pub mod telemetry;
 #[cfg(feature = "transcoder")]
 pub mod transcoder;
 pub mod transport;
@@ -22,9 +21,21 @@ extern crate tracing;
 create_exception!(_rust, NotOpenError, PyException);
 create_exception!(_rust, InvalidAddressError, PyValueError);
 
+pub fn init_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .with_thread_ids(true)
+        .compact()
+        .try_init();
+}
+
 #[pymodule]
 pub fn _rust(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    telemetry::init_telemetry();
+    init_logging();
 
     m.add_class::<transport::endpoint::Endpoint>()?;
     m.add_class::<transport::settings::PyEndpointSettings>()?;

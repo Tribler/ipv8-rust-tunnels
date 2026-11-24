@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use _rust::init_logging;
 use dashmap::DashMap;
 use rand::Rng;
 use tracing::error;
@@ -65,7 +66,7 @@ fn build_network(num_nodes: u8) -> Vec<Arc<TunnelCommunity>> {
 
 #[tokio::main]
 async fn main() {
-    _rust::telemetry::init_telemetry();
+    init_logging();
 
     let nodes = build_network(3);
     let origin = nodes.get(0).unwrap();

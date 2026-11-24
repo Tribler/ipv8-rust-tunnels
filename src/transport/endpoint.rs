@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -12,7 +11,6 @@ use tokio::runtime::Runtime;
 
 use crate::community::engine::PyTunnelEngine;
 use crate::task_manager::TaskManager;
-use crate::telemetry::{ASSIGNED_CONSOLES_PORT, CURRENT_TEXT_LEVEL, DEBUG_ENABLED};
 use crate::transport::buffer::{Buffer, BufferPool};
 use crate::transport::listener::PacketListener;
 use crate::transport::router::PacketRouter;
@@ -270,46 +268,5 @@ impl Endpoint {
             let _ = result.set_item(key, value.to_vec());
         }
         Ok(result.into_any().unbind())
-    }
-
-    pub fn set_debug(&self, enable: bool) -> PyResult<()> {
-        if enable {
-            DEBUG_ENABLED.store(true, Ordering::Relaxed);
-            info!("Tokio debugging enabled");
-        } else {
-            DEBUG_ENABLED.store(false, Ordering::Relaxed);
-            info!("Tokio debugging disabled");
-        }
-        Ok(())
-    }
-
-    pub fn get_debug(&self) -> PyResult<bool> {
-        Ok(DEBUG_ENABLED.load(Ordering::Relaxed))
-    }
-
-    pub fn set_level(&self, level: String) -> PyResult<()> {
-        let normalized = level.to_lowercase();
-        let level_byte = match normalized.as_str() {
-            "off" => 0,
-            "error" => 1,
-            "warn" => 2,
-            "info" => 3,
-            "debug" => 4,
-            "trace" => 5,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Invalid log level. Choose from: trace, debug, info, warn, error, off",
-                ))
-            }
-        };
-
-        CURRENT_TEXT_LEVEL.store(level_byte, Ordering::Relaxed);
-        info!("Log level set to: {}", normalized);
-        Ok(())
-    }
-
-    #[getter]
-    pub fn debug_port(&self) -> u16 {
-        ASSIGNED_CONSOLES_PORT.load(Ordering::Relaxed)
     }
 }

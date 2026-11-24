@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use _rust::community::serialization::{circuit_id_to_ip, Raw, Socks5Payload};
+use _rust::init_logging;
 use _rust::peer::Peer;
 use _rust::util::start_socks5_client;
 use deku::DekuContainerWrite;
@@ -26,7 +27,7 @@ use crate::common::connect_communities;
 
 #[tokio::main]
 async fn main() {
-    _rust::telemetry::init_telemetry();
+    init_logging();
 
     let settings = Arc::new(arc_swap::ArcSwap::from_pointee(EndpointSettings::default()));
     let mut nodes = Vec::new();

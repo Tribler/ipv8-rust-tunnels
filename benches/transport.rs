@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use _rust::init_logging;
 use _rust::task_manager::TaskManager;
 use _rust::transport::buffer::{Buffer, BufferPool};
 use _rust::transport::settings::EndpointSettings;
@@ -13,6 +14,8 @@ use common::{create_listener, to_mb};
 
 #[tokio::main]
 async fn main() {
+    init_logging();
+
     let settings = Arc::new(arc_swap::ArcSwap::from_pointee(EndpointSettings::default()));
 
     let handle = tokio::runtime::Handle::try_current().unwrap();
